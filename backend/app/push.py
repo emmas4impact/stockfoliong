@@ -1,15 +1,15 @@
 import base64
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import requests
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2 import service_account
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import desc, select
+from sqlalchemy.orm import Session
 
-from .models import PortfolioAlertState, PortfolioHolding, PushDeviceToken, User
+from .models import ApiCache, MarketStatus, PushDeviceToken, Stock, SyncLog, User
 from .settings import Settings
 
 
@@ -169,101 +169,270 @@ def remove_push_token(db: Session, user: User, *, token: str) -> bool:
     return True
 
 
-def dispatch_portfolio_price_alerts(db: Session, settings: Settings) -> dict[str, int]:
+def _normalized_market_status(status: str | None) -> str:
+    return (status or "").strip().upper().replace("-", "_")
+
+
+def _is_market_open_status(status: str | None) -> bool:
+    normalized = _normalized_market_status(status)
+    if not normalized:
+        return False
+    if "PRE_OPEN" in normalized or "END_OF_DAY" in normalized or "ENDOFDAY" in normalized:
+        return False
+    return "START_INDEX" in normalized or "OPEN" in normalized
+
+
+def _sync_log_exists(db: Session, source: str) -> bool:
+    return db.scalar(select(SyncLog.id).where(SyncLog.source == source).limit(1)) is not None
+
+
+def _record_push_log(db: Session, source: str, message: str | None = None) -> None:
+    db.add(SyncLog(status="success", source=source, message=message))
+
+
+def _current_wat(now: datetime | None = None) -> datetime:
+    wat = timezone(timedelta(hours=1))
+    base = now or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    return base.astimezone(wat)
+
+
+def _is_live_market_session(now: datetime | None = None) -> bool:
+    wat_now = _current_wat(now)
+    if wat_now.weekday() >= 5:
+        return False
+    market_open = time(hour=9, minute=0)
+    market_close = time(hour=16, minute=0)
+    return market_open <= wat_now.time() <= market_close
+
+
+def _dividend_event_today(record: dict, today: date) -> tuple[str, str] | None:
+    today_iso = today.isoformat()
+    event_fields = [
+        ("pay_date", "payout"),
+        ("record_date", "record"),
+        ("ex_dividend_date", "ex-dividend"),
+    ]
+    for field_name, label in event_fields:
+        field_value = record.get(field_name)
+        if field_value == today_iso:
+            return field_name, label
+    return None
+
+
+def _dispatch_dividend_alerts(db: Session, settings: Settings, devices: list[PushDeviceToken]) -> tuple[int, int]:
+    today = _current_wat().date()
+    caches = db.scalars(
+        select(ApiCache).where(ApiCache.cache_key.like("dividends:%"))
+    ).all()
+    alerts_sent = 0
+    tokens_sent = 0
+
+    for cache_entry in caches:
+        try:
+            payload = json.loads(cache_entry.payload)
+        except ValueError:
+            continue
+        if not isinstance(payload, list):
+            continue
+
+        today_record: dict | None = None
+        event_label: str | None = None
+        event_field: str | None = None
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            event = _dividend_event_today(item, today)
+            if event is None:
+                continue
+            event_field, event_label = event
+            today_record = item
+            break
+
+        if today_record is None or event_label is None or event_field is None:
+            continue
+
+        symbol = str(today_record.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        source = f"dividend_push:{today.isoformat()}:{symbol}:{event_field}"
+        if _sync_log_exists(db, source):
+            continue
+
+        amount = today_record.get("dividend_per_share")
+        amount_text = ""
+        if isinstance(amount, (int, float)):
+            currency = str(today_record.get("currency") or "NGN").strip() or "NGN"
+            amount_text = f" {currency} {float(amount):,.2f}"
+
+        title = f"{symbol} dividend event is today"
+        body = (
+            f"{symbol} {event_label} date lands today.{amount_text} "
+            "Check the latest news on the shares in Stockfolio NG."
+        )
+        delivered = _deliver_push_bundle(
+            db,
+            settings,
+            devices,
+            title=title,
+            body=body,
+            data={
+                "type": "dividend_alert",
+                "route": "stocks",
+                "symbol": symbol,
+                "event_type": event_field,
+            },
+        )
+        if delivered:
+            _record_push_log(db, source, f"Delivered {symbol} dividend alert to {delivered} device(s).")
+            alerts_sent += 1
+            tokens_sent += delivered
+
+    return alerts_sent, tokens_sent
+
+
+def _deliver_push_bundle(
+    db: Session,
+    settings: Settings,
+    devices: list[PushDeviceToken],
+    *,
+    title: str,
+    body: str,
+    data: dict[str, str],
+) -> int:
+    invalid_devices: list[PushDeviceToken] = []
+    delivered = 0
+    for device in devices:
+        try:
+            send_push_message(
+                settings,
+                token=device.token,
+                title=title,
+                body=body,
+                data=data,
+            )
+        except PushDeliveryError as exc:
+            logger.warning("Push delivery failed on %s for %s: %s", device.platform, data.get("symbol", "market"), exc)
+            if is_invalid_push_token_error(str(exc)):
+                invalid_devices.append(device)
+            continue
+        delivered += 1
+
+    for device in invalid_devices:
+        db.delete(device)
+
+    return delivered
+
+
+def dispatch_market_price_alerts(db: Session, settings: Settings) -> dict[str, int]:
     threshold = max(0.1, settings.push_alert_threshold_percent)
     devices = db.scalars(
         select(PushDeviceToken).where(PushDeviceToken.notifications_enabled.is_(True))
     ).all()
-    tokens_by_user: dict[int, list[PushDeviceToken]] = {}
-    for device in devices:
-        tokens_by_user.setdefault(device.user_id, []).append(device)
+    if not devices:
+        return {
+            "market_open_alerts_sent": 0,
+            "stock_alerts_sent": 0,
+            "dividend_alerts_sent": 0,
+            "tokens_sent": 0,
+        }
 
-    holdings = db.scalars(
-        select(PortfolioHolding)
-        .options(selectinload(PortfolioHolding.stock), selectinload(PortfolioHolding.user))
-        .order_by(PortfolioHolding.user_id, PortfolioHolding.stock_symbol)
-    ).all()
-
-    alerts_sent = 0
+    market_open_alerts_sent = 0
+    stock_alerts_sent = 0
+    dividend_alerts_sent = 0
     tokens_sent = 0
-    for holding in holdings:
-        current_price = float(holding.stock.last_price) if holding.stock and holding.stock.last_price is not None else None
-        if current_price is None or current_price <= 0:
-            continue
 
-        state = db.scalar(
-            select(PortfolioAlertState).where(
-                PortfolioAlertState.user_id == holding.user_id,
-                PortfolioAlertState.stock_symbol == holding.stock_symbol,
+    today = date.today().isoformat()
+    market_status = db.scalar(select(MarketStatus).order_by(MarketStatus.updated_at.desc(), MarketStatus.id.desc()).limit(1))
+    market_is_live = (
+        market_status is not None
+        and _is_market_open_status(market_status.status)
+        and _is_live_market_session()
+    )
+    if market_is_live:
+        source = f"market_open_push:{today}"
+        if not _sync_log_exists(db, source):
+            delivered = _deliver_push_bundle(
+                db,
+                settings,
+                devices,
+                title="NGX market is now open",
+                body="The trading session is live. Open Stockfolio NG to track current prices and daily charts.",
+                data={
+                    "type": "market_open_alert",
+                    "route": "home",
+                    "status": market_status.status,
+                },
             )
-        )
-        if state is None:
-            state = PortfolioAlertState(
-                user_id=holding.user_id,
-                stock_symbol=holding.stock_symbol,
-                baseline_price=current_price,
-                last_seen_price=current_price,
-            )
-            db.add(state)
+            if delivered:
+                _record_push_log(db, source, f"Delivered market-open alert to {delivered} device(s).")
+                market_open_alerts_sent = 1
+                tokens_sent += delivered
+
+    dividend_alerts_sent, dividend_tokens = _dispatch_dividend_alerts(
+        db,
+        settings,
+        devices,
+    )
+    tokens_sent += dividend_tokens
+
+    if not market_is_live:
+        db.commit()
+        return {
+            "market_open_alerts_sent": 0,
+            "stock_alerts_sent": 0,
+            "dividend_alerts_sent": dividend_alerts_sent,
+            "tokens_sent": tokens_sent,
+        }
+
+    movers = db.scalars(
+        select(Stock)
+        .where(Stock.last_price.is_not(None), Stock.percent_change.is_not(None))
+        .order_by(desc(Stock.percent_change), Stock.symbol)
+    ).all()
+    for stock in movers:
+        change_percent = float(stock.percent_change or 0)
+        current_price = float(stock.last_price or 0)
+        if current_price <= 0 or abs(change_percent) < threshold:
             continue
 
-        if state.baseline_price is None or float(state.baseline_price) <= 0:
-            state.baseline_price = current_price
-        reference_price = float(state.last_alert_price or state.baseline_price or state.last_seen_price or 0)
-        state.last_seen_price = current_price
-        if reference_price <= 0:
-            continue
-
-        change_percent = ((current_price - reference_price) / reference_price) * 100
-        if abs(change_percent) < threshold:
-            continue
-
-        devices_for_user = tokens_by_user.get(holding.user_id, [])
-        if not devices_for_user:
+        source = f"market_stock_push:{today}:{stock.symbol}"
+        if _sync_log_exists(db, source):
             continue
 
         title = (
-            f"{holding.stock_symbol} is on fire today"
+            f"{stock.symbol} is on fire today"
             if change_percent > 0
-            else f"{holding.stock_symbol} is under pressure today"
+            else f"{stock.symbol} is under pressure today"
         )
         body = (
-            f"Current price NGN {current_price:,.2f} ({change_percent:+.2f}% since the last alert). "
-            "Tap to view your portfolio."
+            f"Current price NGN {current_price:,.2f} ({change_percent:+.2f}% today). "
+            "Tap to inspect the stock chart."
         )
-        invalid_devices: list[PushDeviceToken] = []
-        delivered = 0
-        for device in devices_for_user:
-            try:
-                send_push_message(
-                    settings,
-                    token=device.token,
-                    title=title,
-                    body=body,
-                    data={
-                        "type": "portfolio_price_alert",
-                        "route": "portfolio",
-                        "symbol": holding.stock_symbol,
-                        "price": f"{current_price:.4f}",
-                        "change_percent": f"{change_percent:.4f}",
-                    },
-                )
-            except PushDeliveryError as exc:
-                logger.warning("Push delivery failed for %s on %s: %s", holding.stock_symbol, device.platform, exc)
-                if is_invalid_push_token_error(str(exc)):
-                    invalid_devices.append(device)
-                continue
-            delivered += 1
-
-        for device in invalid_devices:
-            db.delete(device)
-
+        delivered = _deliver_push_bundle(
+            db,
+            settings,
+            devices,
+            title=title,
+            body=body,
+            data={
+                "type": "market_price_alert",
+                "route": "stocks",
+                "symbol": stock.symbol,
+                "price": f"{current_price:.4f}",
+                "change_percent": f"{change_percent:.4f}",
+            },
+        )
         if delivered:
-            state.last_alert_price = current_price
-            state.last_alert_change_percent = change_percent
-            state.last_notified_at = datetime.now(timezone.utc)
-            alerts_sent += 1
+            _record_push_log(db, source, f"Delivered {stock.symbol} market alert to {delivered} device(s).")
+            stock_alerts_sent += 1
             tokens_sent += delivered
 
     db.commit()
-    return {"alerts_sent": alerts_sent, "tokens_sent": tokens_sent}
+    return {
+        "market_open_alerts_sent": market_open_alerts_sent,
+        "stock_alerts_sent": stock_alerts_sent,
+        "dividend_alerts_sent": dividend_alerts_sent,
+        "tokens_sent": tokens_sent,
+    }

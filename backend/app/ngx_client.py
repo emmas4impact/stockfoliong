@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from html import unescape
 import re
@@ -60,6 +60,18 @@ def _ttl_cache(ttl_seconds: int):
     return decorator
 
 
+def clear_runtime_caches(function_names: set[str] | None = None) -> None:
+    with _ttl_cache_lock:
+        if function_names is None:
+            _ttl_cache_store.clear()
+            return
+        stale_keys = [
+            key for key in _ttl_cache_store.keys() if str(key[0]) in function_names
+        ]
+        for key in stale_keys:
+            _ttl_cache_store.pop(key, None)
+
+
 def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -72,6 +84,39 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _ngxpulse_headers() -> dict[str, str]:
+    settings = get_settings()
+    api_key = (settings.ngxpulse_api_key or "").strip()
+    if not api_key:
+        raise NgxFetchError("NGX Pulse API key is not configured.")
+    return {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-API-Key": api_key,
+    }
+
+
+def _ngxpulse_query_params(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    settings = get_settings()
+    api_key = (settings.ngxpulse_api_key or "").strip()
+    if not api_key:
+        raise NgxFetchError("NGX Pulse API key is not configured.")
+    params: dict[str, Any] = {"X-API-Key": api_key}
+    if extra:
+        params.update(extra)
+    return params
+
+
+def _ngxpulse_base_url() -> str:
+    settings = get_settings()
+    base_url = (settings.ngxpulse_base_url or "").strip().rstrip("/")
+    if not base_url:
+        return "https://www.ngxpulse.ng"
+    if "://ngxpulse.ng" in base_url:
+        return base_url.replace("://ngxpulse.ng", "://www.ngxpulse.ng", 1)
+    return base_url
+
+
 def _first(item: dict[str, Any], keys: list[str]) -> Any:
     lowered = {str(key).lower(): value for key, value in item.items()}
     for key in keys:
@@ -82,22 +127,98 @@ def _first(item: dict[str, Any], keys: list[str]) -> Any:
     return None
 
 
+def _parse_date(value: Any) -> date | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _list_payload(payload: Any, keys: list[str]) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        data = payload.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in keys:
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+    return []
+
+
 def normalize_stock(raw: dict[str, Any], source: str) -> dict[str, Any] | None:
     symbol = _first(raw, ["SYMBOL", "symbol", "ticker", "code", "Symbol", "Ticker"])
     if not symbol:
         return None
 
     symbol_text = str(symbol).strip().upper()
-    last_price = _number(_first(raw, ["Value", "last_price", "lastPrice", "price", "currentPrice", "close", "Close"]))
+    last_price = _number(
+        _first(
+            raw,
+            [
+                "Value",
+                "last_price",
+                "lastPrice",
+                "price",
+                "currentPrice",
+                "current_price",
+                "close",
+                "Close",
+            ],
+        )
+    )
     previous_close = _number(_first(raw, ["previous_close", "previousClose", "pclose", "prevClose"]))
-    raw_price_move = _number(
-        _first(raw, ["Change", "change", "PercChange", "percent_change", "changePercent", "percentageChange", "Change %"])
+    raw_absolute_change = _number(
+        _first(raw, ["Change", "change", "change_amount", "changeAmount", "price_change", "absolute_change"])
+    )
+    raw_percent_change = _number(
+        _first(
+            raw,
+            [
+                "PercChange",
+                "percent_change",
+                "change_percent",
+                "changePercent",
+                "percentageChange",
+                "Change %",
+                "pct_change",
+            ],
+        )
     )
     open_price = _number(_first(raw, ["Open", "open", "open_price"]))
-    if open_price in (None, 0) and last_price is not None and raw_price_move is not None:
-        derived_open = last_price - raw_price_move
-        if derived_open > 0:
-            open_price = derived_open
+    if previous_close in (None, 0) and last_price not in (None, 0) and raw_percent_change is not None:
+        previous_close = last_price / (1 + (raw_percent_change / 100)) if raw_percent_change != -100 else None
+    if previous_close in (None, 0) and last_price is not None and raw_absolute_change is not None:
+        derived_previous_close = last_price - raw_absolute_change
+        if derived_previous_close > 0:
+            previous_close = derived_previous_close
+    if open_price in (None, 0) and previous_close not in (None, 0):
+        open_price = previous_close
     high_price = _number(_first(raw, ["High", "high", "high_price", "dayHigh"]))
     low_price = _number(_first(raw, ["Low", "low", "low_price", "dayLow"]))
     ngx_id = _first(raw, ["ngx_id", "ngxId", "isin", "ISIN"])
@@ -112,15 +233,42 @@ def normalize_stock(raw: dict[str, Any], source: str) -> dict[str, Any] | None:
     if margin is None and high_price is not None and low_price is not None and last_price:
         margin = ((high_price - low_price) / last_price) * 100
 
+    shares_outstanding = _number(
+        _first(raw, ["shares_outstanding", "sharesOutstanding", "SharesOutstanding", "listed_shares"])
+    )
+    pe_ratio = _number(
+        _first(
+            raw,
+            [
+                "pe_ratio",
+                "peRatio",
+                "PE",
+                "p_e",
+                "price_earnings",
+                "priceEarnings",
+                "priceEarningsRatio",
+                "trailing_pe",
+                "ttm_pe",
+                "PERatio",
+            ],
+        )
+    )
+
     reference_price = previous_close if previous_close not in (None, 0) else open_price
     computed_change: float | None = None
     computed_percent_change: float | None = None
-    if raw_price_move is not None and open_price not in (None, 0):
-        computed_change = raw_price_move
-        computed_percent_change = (computed_change / open_price) * 100
-    elif last_price is not None and reference_price not in (None, 0):
+    if last_price is not None and reference_price not in (None, 0):
         computed_change = last_price - reference_price
         computed_percent_change = (computed_change / reference_price) * 100
+    if raw_absolute_change is not None and reference_price not in (None, 0):
+        computed_change = raw_absolute_change
+        computed_percent_change = (computed_change / reference_price) * 100
+    if raw_percent_change is not None:
+        computed_percent_change = raw_percent_change
+        if computed_change is None and reference_price not in (None, 0):
+            computed_change = reference_price * (raw_percent_change / 100)
+    elif last_price is not None and reference_price not in (None, 0):
+        computed_change = last_price - reference_price
 
     return {
         "symbol": symbol_text,
@@ -134,19 +282,57 @@ def normalize_stock(raw: dict[str, Any], source: str) -> dict[str, Any] | None:
         "high_price": high_price,
         "low_price": low_price,
         "volume": _number(_first(raw, ["Volume", "volume"])),
-        "market_cap": _number(_first(raw, ["MarketCap", "market_cap", "marketCap", "Mkt Cap"])),
-        "change": computed_change if computed_change is not None else raw_price_move,
+        "shares_outstanding": shares_outstanding,
+        "pe_ratio": pe_ratio,
+        "market_cap": (
+            _number(_first(raw, ["MarketCap", "market_cap", "marketCap", "Mkt Cap"]))
+            or (
+                (shares_outstanding or 0) * last_price
+                if last_price is not None and shares_outstanding
+                else None
+            )
+        ),
+        "change": computed_change if computed_change is not None else raw_absolute_change,
         "percent_change": (
             computed_percent_change
             if computed_percent_change is not None
-            else raw_price_move
+            else raw_percent_change
         ),
         "margin": margin,
         "source": source,
     }
 
 
-def fetch_all_stocks_from_ngx() -> list[dict[str, Any]]:
+def _fetch_all_stocks_from_ngxpulse() -> list[dict[str, Any]]:
+    try:
+        response = _get_session().get(
+            f"{_ngxpulse_base_url()}/api/ngxdata/stocks",
+            params=_ngxpulse_query_params(),
+            headers=_ngxpulse_headers(),
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        raise NgxFetchError(f"NGX Pulse stocks request failed: {exc}") from exc
+    except ValueError as exc:
+        raise NgxFetchError(f"NGX Pulse stocks response was not valid JSON: {exc}") from exc
+    results = _list_payload(payload, ["stocks", "equities", "results", "items", "data"])
+    if not results:
+        if isinstance(payload, dict):
+            payload_keys = ", ".join(sorted(str(key) for key in payload.keys()))
+            raise NgxFetchError(
+                f"NGX Pulse stocks response did not include an equities list. Payload keys: {payload_keys or 'none'}."
+            )
+        raise NgxFetchError("NGX Pulse stocks response did not include an equities list.")
+    return [
+        stock
+        for item in results
+        if isinstance(item, dict) and (stock := normalize_stock(item, "ngxpulse"))
+    ]
+
+
+def _fetch_all_stocks_from_doclib() -> list[dict[str, Any]]:
     settings = get_settings()
     try:
         response = _get_session().get(
@@ -169,47 +355,145 @@ def fetch_all_stocks_from_ngx() -> list[dict[str, Any]]:
     return [stock for item in payload if isinstance(item, dict) and (stock := normalize_stock(item, "ngx_doclib"))]
 
 
+def fetch_all_stocks_from_ngx() -> list[dict[str, Any]]:
+    settings = get_settings()
+    if not settings.ngxpulse_enabled:
+        return _fetch_all_stocks_from_doclib()
+
+    try:
+        return _fetch_all_stocks_from_ngxpulse()
+    except NgxFetchError as pulse_exc:
+        try:
+            return _fetch_all_stocks_from_doclib()
+        except NgxFetchError as fallback_exc:
+            raise NgxFetchError(
+                f"{pulse_exc} Official NGX fallback also failed: {fallback_exc}"
+            ) from fallback_exc
+
+
 @_ttl_cache(ttl_seconds=30)
 def fetch_all_stocks_from_ngx_cached() -> list[dict[str, Any]]:
     return fetch_all_stocks_from_ngx()
 
 
-def fetch_historical_prices(ngx_id: str) -> list[dict[str, Any]]:
+def fetch_historical_prices(
+    symbol: str,
+    ngx_id: str | None = None,
+    *,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    allow_legacy_fallback: bool = True,
+) -> list[dict[str, Any]]:
+    def fetch_from_ngxpulse(normalized_symbol: str, start_date: date, end_date: date) -> list[dict[str, Any]]:
+        try:
+            response = _get_session().get(
+                f"{_ngxpulse_base_url()}/api/ngxdata/prices/{normalized_symbol}",
+                params=_ngxpulse_query_params(
+                    {
+                        "from": start_date.isoformat(),
+                        "to": end_date.isoformat(),
+                    }
+                ),
+                headers=_ngxpulse_headers(),
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise NgxFetchError(f"NGX Pulse historical prices request failed for {normalized_symbol}: {exc}") from exc
+        except ValueError as exc:
+            raise NgxFetchError(
+                f"NGX Pulse historical prices response was not valid JSON for {normalized_symbol}: {exc}"
+            ) from exc
+
+        prices = payload.get("prices") if isinstance(payload, dict) else None
+        if not isinstance(prices, list):
+            raise NgxFetchError(f"NGX Pulse historical prices response was not a prices list for {normalized_symbol}.")
+
+        rows: list[dict[str, Any]] = []
+        for item in prices:
+            if not isinstance(item, dict):
+                continue
+            parsed_date = _parse_date(item.get("trade_date"))
+            if parsed_date is None:
+                continue
+            rows.append(
+                {
+                    "trade_date": parsed_date,
+                    "open_price": _number(item.get("open_price")) or _number(item.get("close_price")),
+                    "high_price": _number(item.get("high_price")),
+                    "low_price": _number(item.get("low_price")),
+                    "close_price": _number(item.get("close_price")),
+                    "volume": _number(item.get("volume")),
+                }
+            )
+        return [row for row in rows if row.get("close_price") is not None]
+
+    def fetch_from_ngx_chart(chart_id: str) -> list[dict[str, Any]]:
+        settings = get_settings()
+        try:
+            response = _get_session().get(f"{settings.ngx_chart_base_url}{chart_id}", timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise NgxFetchError(f"NGX chart request failed for {chart_id}: {exc}") from exc
+        except ValueError as exc:
+            raise NgxFetchError(f"NGX chart response was not valid JSON for {chart_id}: {exc}") from exc
+        if not isinstance(payload, list):
+            raise NgxFetchError(f"NGX chart response was not a list for {chart_id}.")
+
+        raw_rows: list[tuple[date, float]] = []
+        for item in payload:
+            if not isinstance(item, list) or len(item) < 2:
+                continue
+            timestamp_ms, price = item[0], _number(item[1])
+            if price is None:
+                continue
+            raw_rows.append((datetime.fromtimestamp(float(timestamp_ms) / 1000).date(), price))
+
+        rows: list[dict[str, Any]] = []
+        previous_close: float | None = None
+        for trade_date, close_price in sorted(raw_rows, key=lambda item: item[0]):
+            rows.append(
+                {
+                    "trade_date": trade_date,
+                    "open_price": previous_close if previous_close is not None else close_price,
+                    "high_price": close_price,
+                    "low_price": close_price,
+                    "close_price": close_price,
+                }
+            )
+            previous_close = close_price
+        return rows
+
+    settings = get_settings()
+    normalized_symbol = symbol.strip().upper()
+    end_date = to_date or date.today()
+    start_date = from_date or (end_date - timedelta(days=365 * 5))
+    if settings.ngxpulse_enabled:
+        try:
+            return fetch_from_ngxpulse(normalized_symbol, start_date, end_date)
+        except NgxFetchError as pulse_exc:
+            if not allow_legacy_fallback:
+                raise pulse_exc
+            fallback_ngx_id = ngx_id
+            if not fallback_ngx_id:
+                try:
+                    fallback_ngx_id = discover_stock_ngx_id(normalized_symbol)
+                except NgxFetchError:
+                    fallback_ngx_id = None
+            if fallback_ngx_id:
+                try:
+                    return fetch_from_ngx_chart(fallback_ngx_id)
+                except NgxFetchError as fallback_exc:
+                    raise NgxFetchError(
+                        f"{pulse_exc} Official NGX chart fallback also failed for {normalized_symbol}: {fallback_exc}"
+                    ) from fallback_exc
+            raise pulse_exc
+
     if not ngx_id:
         return []
-
-    try:
-        response = _get_session().get(f"{get_settings().ngx_chart_base_url}{ngx_id}", timeout=20)
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        raise NgxFetchError(f"NGX chart request failed for {ngx_id}: {exc}") from exc
-    except ValueError as exc:
-        raise NgxFetchError(f"NGX chart response was not valid JSON for {ngx_id}: {exc}") from exc
-    if not isinstance(payload, list):
-        raise NgxFetchError(f"NGX chart response was not a list for {ngx_id}.")
-
-    raw_rows: list[tuple[date, float]] = []
-    for item in payload:
-        if not isinstance(item, list) or len(item) < 2:
-            continue
-        timestamp_ms, price = item[0], _number(item[1])
-        if price is None:
-            continue
-        raw_rows.append((datetime.fromtimestamp(float(timestamp_ms) / 1000).date(), price))
-
-    rows: list[dict[str, Any]] = []
-    previous_close: float | None = None
-    for trade_date, close_price in sorted(raw_rows, key=lambda item: item[0]):
-        rows.append(
-            {
-                "trade_date": trade_date,
-                "open_price": previous_close if previous_close is not None else close_price,
-                "close_price": close_price,
-            }
-        )
-        previous_close = close_price
-    return rows
+    return fetch_from_ngx_chart(ngx_id)
 
 
 def fetch_company_profile_html(symbol: str) -> str:
@@ -293,61 +577,157 @@ def fetch_stock_logo(symbol: str) -> tuple[bytes, str] | None:
     return response.content, media_type or "image/png"
 
 
-def fetch_market_status_from_ngx() -> tuple[str, Any]:
-    try:
-        response = _get_session().get(
-            get_settings().market_status_url,
-            headers={"Accept": "application/json"},
-            timeout=10,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        raise NgxFetchError(f"NGX market status request failed: {exc}") from exc
-    except ValueError as exc:
-        raise NgxFetchError(f"NGX market status response was not valid JSON: {exc}") from exc
+def fetch_market_status_from_ngx() -> tuple[str, Any, str]:
+    def fetch_from_ngxpulse() -> tuple[str, Any, str]:
+        try:
+            response = _get_session().get(
+                f"{_ngxpulse_base_url()}/api/ngxdata/market-status",
+                params=_ngxpulse_query_params(),
+                headers=_ngxpulse_headers(),
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise NgxFetchError(f"NGX Pulse market status request failed: {exc}") from exc
+        except ValueError as exc:
+            raise NgxFetchError(f"NGX Pulse market status response was not valid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise NgxFetchError("NGX Pulse market status response was not an object.")
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        if not isinstance(data, dict):
+            raise NgxFetchError("NGX Pulse market status payload did not include a status object.")
 
-    status = "UNKNOWN"
-    if isinstance(payload, list) and payload:
-        first = payload[0]
-        if isinstance(first, dict):
-            status = str(first.get("MktStatus1") or first.get("status") or first.get("Status") or status)
-    elif isinstance(payload, dict):
-        status = str(payload.get("MktStatus1") or payload.get("status") or payload.get("Status") or status)
-    return status, payload
+        human_status = str(data.get("status") or "").strip()
+        raw_status = str(data.get("raw_status") or "").strip()
+        is_open = data.get("is_open")
+        if isinstance(is_open, bool):
+            default_status = "Market Open" if is_open else "Market Closed"
+            status = human_status or raw_status or default_status
+        else:
+            normalized = f"{human_status} {raw_status}".strip().upper().replace("-", "_")
+            if "OPEN" in normalized or "START_INDEX" in normalized:
+                status = human_status or raw_status or "Market Open"
+            elif normalized:
+                status = human_status or raw_status
+            else:
+                status = "UNKNOWN"
+        return status, payload, "ngxpulse_market_status"
+
+    def fetch_from_doclib() -> tuple[str, Any, str]:
+        settings = get_settings()
+        try:
+            response = _get_session().get(
+                settings.market_status_url,
+                headers={"Accept": "application/json"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise NgxFetchError(f"NGX market status request failed: {exc}") from exc
+        except ValueError as exc:
+            raise NgxFetchError(f"NGX market status response was not valid JSON: {exc}") from exc
+
+        status = "UNKNOWN"
+        if isinstance(payload, list) and payload:
+            first = payload[0]
+            if isinstance(first, dict):
+                status = str(first.get("MktStatus1") or first.get("status") or first.get("Status") or status)
+        elif isinstance(payload, dict):
+            status = str(payload.get("MktStatus1") or payload.get("status") or payload.get("Status") or status)
+        return status, payload, "ngx_market_status"
+
+    settings = get_settings()
+    if not settings.ngxpulse_enabled:
+        return fetch_from_doclib()
+
+    try:
+        return fetch_from_ngxpulse()
+    except NgxFetchError as pulse_exc:
+        try:
+            return fetch_from_doclib()
+        except NgxFetchError as fallback_exc:
+            raise NgxFetchError(
+                f"{pulse_exc} Official NGX market status fallback also failed: {fallback_exc}"
+            ) from fallback_exc
 
 
 def fetch_market_snapshot_from_ngx() -> dict[str, Any]:
-    try:
-        response = _get_session().get(
-            get_settings().market_snapshot_url,
-            headers={
-                "Accept": "application/json;odata=verbose",
-                "Content-Type": "application/json;odata=verbose",
-                "Origin": "https://ngxgroup.com",
-                "Referer": "https://ngxgroup.com/exchange/data/company-profile/",
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        raise NgxFetchError(f"NGX market snapshot request failed: {exc}") from exc
-    except ValueError as exc:
-        raise NgxFetchError(f"NGX market snapshot response was not valid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise NgxFetchError("NGX market snapshot response was not an object.")
+    def fetch_from_ngxpulse() -> dict[str, Any]:
+        try:
+            response = _get_session().get(
+                f"{_ngxpulse_base_url()}/api/ngxdata/market",
+                params=_ngxpulse_query_params(),
+                headers=_ngxpulse_headers(),
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise NgxFetchError(f"NGX Pulse market overview request failed: {exc}") from exc
+        except ValueError as exc:
+            raise NgxFetchError(f"NGX Pulse market overview response was not valid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise NgxFetchError("NGX Pulse market overview response was not an object.")
 
-    return {
-        "asi": _number(_first(payload, ["ASI"])),
-        "deals": _number(_first(payload, ["DEALS"])),
-        "volume": _number(_first(payload, ["VOLUME"])),
-        "value": _number(_first(payload, ["VALUE"])),
-        "market_cap": _number(_first(payload, ["CAP"])),
-        "bond_cap": _number(_first(payload, ["BOND_CAP"])),
-        "etf_cap": _number(_first(payload, ["ETF_CAP"])),
-        "source": "ngx_market_snapshot",
-    }
+        return {
+            "asi": _number(payload.get("asi")),
+            "deals": _number(payload.get("deals")),
+            "volume": _number(payload.get("volume")),
+            "value": _number(payload.get("value")),
+            "market_cap": _number(payload.get("market_cap")),
+            "bond_cap": _number(payload.get("bond_cap")),
+            "etf_cap": _number(payload.get("etf_cap")),
+            "source": "ngxpulse_market",
+        }
+
+    def fetch_from_doclib() -> dict[str, Any]:
+        settings = get_settings()
+        try:
+            response = _get_session().get(
+                settings.market_snapshot_url,
+                headers={
+                    "Accept": "application/json;odata=verbose",
+                    "Content-Type": "application/json;odata=verbose",
+                    "Origin": "https://ngxgroup.com",
+                    "Referer": "https://ngxgroup.com/exchange/data/company-profile/",
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise NgxFetchError(f"NGX market snapshot request failed: {exc}") from exc
+        except ValueError as exc:
+            raise NgxFetchError(f"NGX market snapshot response was not valid JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise NgxFetchError("NGX market snapshot response was not an object.")
+
+        return {
+            "asi": _number(_first(payload, ["ASI"])),
+            "deals": _number(_first(payload, ["DEALS"])),
+            "volume": _number(_first(payload, ["VOLUME"])),
+            "value": _number(_first(payload, ["VALUE"])),
+            "market_cap": _number(_first(payload, ["CAP"])),
+            "bond_cap": _number(_first(payload, ["BOND_CAP"])),
+            "etf_cap": _number(_first(payload, ["ETF_CAP"])),
+            "source": "ngx_market_snapshot",
+        }
+
+    settings = get_settings()
+    if not settings.ngxpulse_enabled:
+        return fetch_from_doclib()
+
+    try:
+        return fetch_from_ngxpulse()
+    except NgxFetchError as pulse_exc:
+        try:
+            return fetch_from_doclib()
+        except NgxFetchError as fallback_exc:
+            raise NgxFetchError(
+                f"{pulse_exc} Official NGX market snapshot fallback also failed: {fallback_exc}"
+            ) from fallback_exc
 
 
 def fetch_company_news_from_ngx(ngx_id: str) -> list[dict[str, Any]]:
@@ -404,6 +784,144 @@ def fetch_company_news_from_ngx(ngx_id: str) -> list[dict[str, Any]]:
     return items
 
 
+def fetch_dividend_history_from_ngxpulse(symbol: str, limit: int = 8) -> list[dict[str, Any]]:
+    normalized_symbol = symbol.strip().upper()
+    last_error: Exception | None = None
+    payload: Any = None
+    request_variants = [
+        (
+            f"{_ngxpulse_base_url()}/api/ngxdata/dividends",
+            _ngxpulse_query_params({"symbol": normalized_symbol, "limit": limit}),
+        ),
+        (
+            f"{_ngxpulse_base_url()}/api/ngxdata/dividends/{normalized_symbol}",
+            _ngxpulse_query_params({"limit": limit}),
+        ),
+    ]
+
+    for url, params in request_variants:
+        try:
+            response = _get_session().get(
+                url,
+                params=params,
+                headers=_ngxpulse_headers(),
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except requests.RequestException as exc:
+            last_error = exc
+            continue
+        except ValueError as exc:
+            raise NgxFetchError(
+                f"NGX Pulse dividend history response was not valid JSON for {normalized_symbol}: {exc}"
+            ) from exc
+    else:
+        raise NgxFetchError(
+            f"NGX Pulse dividend history request failed for {normalized_symbol}: {last_error}"
+        ) from last_error
+
+    history = _list_payload(payload, ["history", "dividends", "results", "items"])
+    items: list[dict[str, Any]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            {
+                "symbol": _first(item, ["symbol"]) or normalized_symbol,
+                "company_name": _first(item, ["company_name", "company", "name"]),
+                "ex_dividend_date": _parse_date(_first(item, ["ex_dividend_date", "exDate"])),
+                "record_date": _parse_date(_first(item, ["record_date", "recordDate"])),
+                "pay_date": _parse_date(_first(item, ["pay_date", "payment_date", "payDate"])),
+                "dividend_per_share": _number(
+                    _first(item, ["dividend_per_share", "dividend", "dividend_amount", "amount"])
+                ),
+                "currency": _first(item, ["currency"]),
+            }
+        )
+    return items
+
+
+def fetch_disclosures_from_ngxpulse(symbol: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {"limit": limit}
+    if symbol:
+        params["symbol"] = symbol.strip().upper()
+    try:
+        response = _get_session().get(
+            f"{_ngxpulse_base_url()}/api/ngxdata/disclosures",
+            params=_ngxpulse_query_params(params),
+            headers=_ngxpulse_headers(),
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        raise NgxFetchError(f"NGX Pulse disclosures request failed: {exc}") from exc
+    except ValueError as exc:
+        raise NgxFetchError(f"NGX Pulse disclosures response was not valid JSON: {exc}") from exc
+
+    disclosures = _list_payload(payload, ["disclosures", "results", "items", "data"])
+    symbol_filter = symbol.strip().upper() if symbol else None
+    items: list[dict[str, Any]] = []
+    for item in disclosures:
+        if not isinstance(item, dict):
+            continue
+        item_symbol = _first(item, ["symbol", "ticker", "stock_symbol"])
+        if symbol_filter and item_symbol and str(item_symbol).strip().upper() != symbol_filter:
+            continue
+        items.append(
+            {
+                "title": _first(item, ["title", "headline", "subject", "name"]),
+                "url": _first(item, ["url", "link", "document_url"]),
+                "published_at": _parse_datetime(
+                    _first(item, ["published_at", "publishedAt", "date", "created_at", "timestamp"])
+                ),
+                "symbol": str(item_symbol).strip().upper() if item_symbol else symbol_filter,
+                "company_name": _first(item, ["company_name", "company", "issuer", "name"]),
+                "category": _first(item, ["category", "type", "submission_type"]),
+                "summary": _first(item, ["summary", "description", "excerpt"]),
+                "source": "ngxpulse_disclosures",
+            }
+        )
+    return items[:limit]
+
+
+def fetch_market_news_from_ngxpulse(limit: int = 8) -> list[dict[str, Any]]:
+    try:
+        response = _get_session().get(
+            f"{_ngxpulse_base_url()}/api/news",
+            params=_ngxpulse_query_params({"limit": limit}),
+            headers=_ngxpulse_headers(),
+            timeout=15,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        raise NgxFetchError(f"NGX Pulse market news request failed: {exc}") from exc
+    except ValueError as exc:
+        raise NgxFetchError(f"NGX Pulse market news response was not valid JSON: {exc}") from exc
+
+    stories = _list_payload(payload, ["news", "articles", "items", "results", "data"])
+    items: list[dict[str, Any]] = []
+    for item in stories:
+        if not isinstance(item, dict):
+            continue
+        items.append(
+            {
+                "title": _first(item, ["title", "headline", "name"]),
+                "url": _first(item, ["url", "link"]),
+                "published_at": _parse_datetime(
+                    _first(item, ["published_at", "publishedAt", "date", "created_at", "timestamp"])
+                ),
+                "source": _first(item, ["source", "publisher"]),
+                "summary": _first(item, ["summary", "description", "excerpt"]),
+                "image_url": _first(item, ["image_url", "image", "thumbnail"]),
+            }
+        )
+    return items[:limit]
+
+
 @_ttl_cache(ttl_seconds=60)
 def fetch_market_snapshot_cached() -> dict[str, Any]:
     return fetch_market_snapshot_from_ngx()
@@ -415,8 +933,36 @@ def fetch_company_news_cached(ngx_id: str) -> list[dict[str, Any]]:
 
 
 @_ttl_cache(ttl_seconds=900)
-def fetch_historical_prices_cached(ngx_id: str) -> list[dict[str, Any]]:
-    return fetch_historical_prices(ngx_id)
+def fetch_historical_prices_cached(
+    symbol: str,
+    ngx_id: str | None = None,
+    *,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    allow_legacy_fallback: bool = True,
+) -> list[dict[str, Any]]:
+    return fetch_historical_prices(
+        symbol,
+        ngx_id,
+        from_date=from_date,
+        to_date=to_date,
+        allow_legacy_fallback=allow_legacy_fallback,
+    )
+
+
+@_ttl_cache(ttl_seconds=900)
+def fetch_dividend_history_cached(symbol: str, limit: int = 8) -> list[dict[str, Any]]:
+    return fetch_dividend_history_from_ngxpulse(symbol, limit)
+
+
+@_ttl_cache(ttl_seconds=300)
+def fetch_disclosures_cached(symbol: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
+    return fetch_disclosures_from_ngxpulse(symbol, limit)
+
+
+@_ttl_cache(ttl_seconds=300)
+def fetch_market_news_cached(limit: int = 8) -> list[dict[str, Any]]:
+    return fetch_market_news_from_ngxpulse(limit)
 
 
 def legacy_seed_stocks() -> list[dict[str, Any]]:

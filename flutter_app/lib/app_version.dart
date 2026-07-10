@@ -6,4 +6,4 @@ const appBuildNumber = String.fromEnvironment(
   'APP_BUILD_NUMBER',
   defaultValue: '1',
 );
-const appDisplayVersion = '$appVersionName.$appBuildNumber';
+const appDisplayVersion = appVersionName;

@@ -4,6 +4,7 @@ from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, St
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from .settings import get_settings
 
 
 class TimestampMixin:
@@ -53,6 +54,8 @@ class Stock(TimestampMixin, Base):
     low_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     volume: Mapped[float | None] = mapped_column(Numeric(20, 2), nullable=True)
     market_cap: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)
+    shares_outstanding: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)
+    pe_ratio: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
     change: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     percent_change: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
     margin: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
@@ -60,6 +63,10 @@ class Stock(TimestampMixin, Base):
 
     prices: Mapped[list["StockPrice"]] = relationship(back_populates="stock", cascade="all, delete-orphan")
     holdings: Mapped[list["PortfolioHolding"]] = relationship(back_populates="stock")
+
+    @property
+    def supports_history(self) -> bool:
+        return bool(self.ngx_id) or get_settings().ngxpulse_enabled
 
 
 class StockPrice(TimestampMixin, Base):
@@ -97,6 +104,14 @@ class MarketStatus(TimestampMixin, Base):
     source: Mapped[str] = mapped_column(String(64), default="ngx_doclib")
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ApiCache(TimestampMixin, Base):
+    __tablename__ = "api_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[str] = mapped_column(Text)
 
 
 class PortfolioHolding(TimestampMixin, Base):

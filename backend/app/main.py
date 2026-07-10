@@ -9,7 +9,9 @@ from dateutil.relativedelta import relativedelta
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pydantic import ValidationError
 from sqlalchemy import desc, func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
 from .auth import create_access_token, get_current_superuser, get_current_user, hash_password, verify_password
@@ -21,24 +23,23 @@ from .ngx_client import (
     NgxFetchError,
     discover_stock_ngx_id,
     fetch_all_stocks_from_ngx_cached,
-    fetch_company_news_cached,
-    fetch_company_news_from_ngx,
-    fetch_market_snapshot_cached,
-    fetch_market_snapshot_from_ngx,
     fetch_stock_logo,
 )
-from .push import PushDeliveryError, dispatch_portfolio_price_alerts, remove_push_token, send_push_message, upsert_push_token
+from .push import PushDeliveryError, dispatch_market_price_alerts, remove_push_token, send_push_message, upsert_push_token
 from .schemas import (
     AccountDeleteRequest,
     AccountDeletionRequestCreate,
     AccountDeletionRequestOut,
     CompanyNewsOut,
+    DisclosureOut,
+    DividendHistoryOut,
     HoldingOut,
     HoldingUpsert,
     LoginRequest,
     MarketIdeasOut,
     MarketIdeaOut,
     MarketLeadersOut,
+    MarketNewsOut,
     MarketSnapshotOut,
     MarketStatusOut,
     MessageResponse,
@@ -62,9 +63,16 @@ from .schemas import (
 )
 from .services import (
     delete_holding,
+    get_cached_company_news,
+    get_cached_disclosures,
+    get_cached_dividend_history,
+    get_cached_market_news,
+    get_cached_market_snapshot,
     get_cached_market_status,
     holding_to_dict,
     record_sync_log,
+    reference_cache_refresh_due,
+    refresh_reference_caches,
     refresh_market_status,
     stock_history_query,
     sync_logs_query,
@@ -88,6 +96,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def prevent_api_response_caching(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if (
+        path.startswith("/public/privacy-policy")
+        or path.startswith("/public/account-deletion")
+        or path.endswith("/logo")
+    ):
+        return response
+    response.headers.setdefault(
+        "Cache-Control",
+        "no-store, no-cache, max-age=0, must-revalidate",
+    )
+    response.headers.setdefault("Pragma", "no-cache")
+    response.headers.setdefault("Expires", "0")
+    return response
+
 MARKET_IDEAS_DISCLAIMER = (
     "Stockfolio NG highlights data-driven watchlist ideas only. "
     "It is not a financial adviser app. Contact your broker for detailed analysis."
@@ -108,6 +135,33 @@ def stock_history_is_stale(rows: list) -> bool:
     return datetime.now(timezone.utc) - latest_updated_at > refresh_after
 
 
+def stock_history_needs_backfill(
+    rows: list,
+    *,
+    normalized_range: str | None,
+    since: date | None,
+    limit_trading_days: int | None,
+) -> bool:
+    if not rows:
+        return True
+    if any(row.open_price is None for row in rows):
+        return True
+    if normalized_range == "all":
+        oldest = min((row.trade_date for row in rows), default=None)
+        if oldest is None:
+            return True
+        return len(rows) < 90 or oldest > date.today() - relativedelta(months=6)
+    if limit_trading_days is not None and limit_trading_days > 0:
+        return len(rows) < limit_trading_days
+    if since is None:
+        return False
+    oldest = min((row.trade_date for row in rows), default=None)
+    if oldest is None:
+        return True
+    grace_days = 5 if normalized_range in {"1w", "1m"} else 14
+    return oldest > since + timedelta(days=grace_days)
+
+
 def intraday_leader_payload(stock: Stock) -> dict | None:
     current_price = float(stock.last_price) if stock.last_price is not None else None
     opening_price = float(stock.open_price) if stock.open_price is not None else None
@@ -116,7 +170,11 @@ def intraday_leader_payload(stock: Stock) -> dict | None:
 
     change = current_price - opening_price
     percent_change = (change / opening_price) * 100
-    payload = StockOut.model_validate(stock).model_dump()
+    try:
+        payload = StockOut.model_validate(stock).model_dump()
+    except ValidationError as exc:
+        logger.warning("Leader StockOut validation failed for %s: %s", stock.symbol, exc)
+        return None
     payload["change"] = change
     payload["percent_change"] = percent_change
     return payload
@@ -128,19 +186,30 @@ def intraday_leader_payload_from_dict(stock: dict) -> dict | None:
     if current_price is None or opening_price is None or opening_price <= 0:
         return None
 
-    payload = dict(stock)
-    payload["change"] = current_price - opening_price
-    payload["percent_change"] = (payload["change"] / opening_price) * 100
-    payload.setdefault("source", "ngx_doclib_live")
+    change = current_price - opening_price
+    percent_change = (change / opening_price) * 100
+    try:
+        payload = StockOut.model_validate(stock).model_dump()
+    except ValidationError as exc:
+        sym = stock.get("symbol") or stock.get("SYMBOL") or "?"
+        logger.warning("Leader StockOut validation failed for live row %s: %s", sym, exc)
+        return None
+    payload["change"] = change
+    payload["percent_change"] = percent_change
+    payload.setdefault("source", stock.get("source") or "ngx_doclib_live")
     return payload
 
 
 def market_leaders_payload(db: Session, limit: int) -> dict:
-    stocks = db.scalars(
-        select(Stock)
-        .where(Stock.last_price.is_not(None), Stock.open_price.is_not(None))
-        .order_by(Stock.symbol)
-    ).all()
+    try:
+        stocks = db.scalars(
+            select(Stock)
+            .where(Stock.last_price.is_not(None), Stock.open_price.is_not(None))
+            .order_by(Stock.symbol)
+        ).all()
+    except SQLAlchemyError as exc:
+        logger.warning("market_leaders: stock query failed (%s); using live fallback only.", exc)
+        stocks = []
     ranked = [payload for stock in stocks if (payload := intraday_leader_payload(stock)) is not None]
     if len(ranked) < max(2, limit):
         try:
@@ -154,10 +223,16 @@ def market_leaders_payload(db: Session, limit: int) -> dict:
         else:
             if live_ranked:
                 ranked = live_ranked
-    ranked.sort(key=lambda item: (item["percent_change"], item["symbol"]), reverse=True)
+    ranked.sort(
+        key=lambda item: (float(item.get("percent_change") or 0), str(item.get("symbol") or "")),
+        reverse=True,
+    )
     return {
         "top_movers": ranked[:limit],
-        "top_losers": sorted(ranked, key=lambda item: (item["percent_change"], item["symbol"]))[:limit],
+        "top_losers": sorted(
+            ranked,
+            key=lambda item: (float(item.get("percent_change") or 0), str(item.get("symbol") or "")),
+        )[:limit],
     }
 
 
@@ -171,14 +246,37 @@ def _percentile(sorted_values: list[float], value: float | None) -> float:
     return less_or_equal / len(sorted_values)
 
 
+def _turnover_ratio(volume: float | None, price: float | None, cap: float | None) -> float | None:
+    if volume is None or price is None or cap is None or cap <= 0:
+        return None
+    return (float(volume) * float(price)) / float(cap)
+
+
+def _pe_value_score(pe: float | None, sorted_pe: list[float]) -> float:
+    if pe is None or pe <= 0 or pe > 250 or not sorted_pe:
+        return 0.0
+    pct = _percentile(sorted_pe, pe)
+    return max(0.0, (1.0 - pct)) * 14.0
+
+
+def _turnover_score_component(turn: float | None, sorted_turnovers: list[float]) -> float:
+    if turn is None or not sorted_turnovers:
+        return 0.0
+    return _percentile(sorted_turnovers, turn) * 10.0
+
+
 def market_ideas_payload(db: Session, limit: int) -> dict:
-    stocks = list(
-        db.scalars(
-            select(Stock)
-            .where(Stock.last_price.is_not(None), Stock.open_price.is_not(None))
-            .order_by(Stock.symbol)
-        ).all()
-    )
+    try:
+        stocks = list(
+            db.scalars(
+                select(Stock)
+                .where(Stock.last_price.is_not(None), Stock.open_price.is_not(None))
+                .order_by(Stock.symbol)
+            ).all()
+        )
+    except SQLAlchemyError as exc:
+        logger.warning("market_ideas: stock query failed (%s); returning empty ideas.", exc)
+        stocks = []
     if not stocks:
         return {
             "disclaimer": MARKET_IDEAS_DISCLAIMER,
@@ -209,6 +307,19 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
     market_caps = sorted(
         float(stock.market_cap) for stock in stocks if stock.market_cap is not None and float(stock.market_cap) > 0
     )
+    sorted_pe = sorted(
+        float(s.pe_ratio) for s in stocks if s.pe_ratio is not None and 0 < float(s.pe_ratio) < 300
+    )
+    turnover_values: list[float] = []
+    for s in stocks:
+        tr = _turnover_ratio(
+            float(s.volume) if s.volume is not None else None,
+            float(s.last_price) if s.last_price is not None else None,
+            float(s.market_cap) if s.market_cap is not None else None,
+        )
+        if tr is not None:
+            turnover_values.append(tr)
+    sorted_turnovers = sorted(turnover_values)
 
     candidates: list[dict] = []
     for stock in stocks:
@@ -230,13 +341,36 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
         if growth_tuple is not None and growth_tuple[0] > 0:
             one_year_growth_percent = ((growth_tuple[1] - growth_tuple[0]) / growth_tuple[0]) * 100
 
+        pe_ratio_val = float(stock.pe_ratio) if stock.pe_ratio is not None else None
+        pe_component = _pe_value_score(pe_ratio_val, sorted_pe)
+        turn = _turnover_ratio(
+            float(stock.volume) if stock.volume is not None else None,
+            current_price,
+            float(stock.market_cap) if stock.market_cap is not None else None,
+        )
+        turnover_component = _turnover_score_component(turn, sorted_turnovers)
+
+        alignment_bonus = 0.0
+        if (
+            stock.shares_outstanding is not None
+            and float(stock.shares_outstanding) > 0
+            and stock.market_cap is not None
+            and float(stock.market_cap) > 0
+        ):
+            implied = float(stock.market_cap) / float(stock.shares_outstanding)
+            if current_price > 0:
+                rel = abs(implied - current_price) / current_price
+                if rel < 0.05:
+                    alignment_bonus = 2.5
+
         score = max(0.0, min(intraday_change, 10.0)) * 4.0
-        score += volume_score * 25.0
-        score += market_cap_score * 15.0
+        score += volume_score * 22.0
+        score += market_cap_score * 12.0
         score += margin_score * 10.0
         score += close_strength * 10.0
         if one_year_growth_percent is not None:
             score += max(-10.0, min(one_year_growth_percent, 40.0)) * 0.7
+        score += pe_component + turnover_component + alignment_bonus
 
         rationale: list[str] = []
         if intraday_change > 0:
@@ -251,20 +385,45 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
             rationale.append(f"Margin is relatively tight at {margin_value:.2f}%.")
         if close_strength > 0:
             rationale.append("Current price is holding above the previous close.")
+        if pe_ratio_val is not None and pe_ratio_val > 0 and sorted_pe:
+            rationale.append(
+                f"P/E near {pe_ratio_val:.1f} (lower vs this NGX batch tilts naive value score upward)."
+            )
+        if turn is not None and sorted_turnovers and _percentile(sorted_turnovers, turn) >= 0.7:
+            rationale.append("Dollar turnover versus market cap is elevated versus the synced batch.")
+        if alignment_bonus > 0:
+            rationale.append("Last price aligns with market cap divided by listed shares (sanity check).")
         if stock.sector:
             rationale.append(f"Sector: {stock.sector}.")
 
+        if sorted_pe:
+            fund_note = (
+                "Scores blend momentum, liquidity, size, optional P/E vs the synced NGX batch, "
+                "and cap/shares price sanity—not investment advice."
+            )
+        else:
+            fund_note = (
+                "P/E missing for most synced names; tilt uses liquidity, size, momentum, "
+                "and cap/shares vs price when available—not investment advice."
+            )
+
+        try:
+            stock_dump = StockOut.model_validate(stock).model_dump()
+        except ValidationError as exc:
+            logger.warning("market_ideas: skip %s - StockOut validation failed: %s", stock.symbol, exc)
+            continue
+
         candidates.append(
             {
-                "stock": StockOut.model_validate(stock).model_dump(),
+                "stock": stock_dump,
                 "score": round(score, 2),
                 "one_year_growth_percent": None if one_year_growth_percent is None else round(one_year_growth_percent, 2),
                 "stocks_analyzed": len(stocks),
-                "rationale": rationale[:4],
+                "rationale": rationale[:5],
                 "web_summary": None,
-                "price_to_earnings_ratio": None,
+                "price_to_earnings_ratio": None if pe_ratio_val is None else round(pe_ratio_val, 2),
                 "price_to_book_ratio": None,
-                "fundamental_note": "P/E and P/B ratios are not yet available from the current synced source.",
+                "fundamental_note": fund_note,
                 "ngx_id": stock.ngx_id,
             }
         )
@@ -274,28 +433,29 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
     for candidate in candidates[: max(limit * 2, 6)]:
         ngx_id = candidate.pop("ngx_id", None)
         if ngx_id:
-            try:
-                news = fetch_company_news_cached(ngx_id)
-            except NgxFetchError as exc:
-                logger.warning("Company news fetch failed while building ideas for %s: %s", candidate["stock"]["symbol"], exc)
-            else:
-                if news:
-                    latest = news[0]
-                    candidate["web_summary"] = latest.get("title") or latest.get("submission_type")
-                    candidate["score"] = round(candidate["score"] + 5.0, 2)
+            news = get_cached_company_news(
+                db,
+                candidate["stock"]["symbol"],
+                ngx_id,
+                6,
+            )
+            if news:
+                latest = news[0]
+                candidate["web_summary"] = latest.get("title") or latest.get("submission_type")
+                candidate["score"] = round(candidate["score"] + 5.0, 2)
+                candidate["rationale"] = [
+                    *candidate["rationale"],
+                    "Recent company update/disclosure is available from NGX sources.",
+                ][:5]
+                latest_title = (latest.get("title") or "").lower()
+                if any(
+                    keyword in latest_title
+                    for keyword in ("audited", "annual report", "financial statement", "q1", "q2", "q3", "q4")
+                ):
                     candidate["rationale"] = [
                         *candidate["rationale"],
-                        "Recent company update/disclosure is available from NGX sources.",
+                        "Latest filing references recent financial statements from the previous reporting period.",
                     ][:5]
-                    latest_title = (latest.get("title") or "").lower()
-                    if any(
-                        keyword in latest_title
-                        for keyword in ("audited", "annual report", "financial statement", "q1", "q2", "q3", "q4")
-                    ):
-                        candidate["rationale"] = [
-                            *candidate["rationale"],
-                            "Latest filing references recent financial statements from the previous reporting period.",
-                        ][:5]
         enriched.append(candidate)
 
     enriched.sort(key=lambda item: (item["score"], item["stock"]["symbol"]), reverse=True)
@@ -324,6 +484,77 @@ def ensure_stock_ngx_id(db: Session, stock: Stock) -> str | None:
     return stock.ngx_id
 
 
+def stock_history_source(stock: Stock) -> str | None:
+    if settings.ngxpulse_enabled:
+        return "ngxpulse_history"
+    if stock.ngx_id:
+        return "ngx_chart"
+    return None
+
+
+def normalize_history_range(range_value: str | None) -> str | None:
+    if range_value is None:
+        return None
+    normalized = (
+        range_value.strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    )
+    if not normalized:
+        return None
+    aliases = {
+        "1d": "1d",
+        "1day": "1d",
+        "day": "1d",
+        "5d": "5d",
+        "5day": "5d",
+        "5days": "5d",
+        "1w": "1w",
+        "week": "1w",
+        "1week": "1w",
+        "1m": "1m",
+        "month": "1m",
+        "1month": "1m",
+        "3m": "3m",
+        "3month": "3m",
+        "3months": "3m",
+        "6m": "6m",
+        "6month": "6m",
+        "6months": "6m",
+        "1y": "1y",
+        "year": "1y",
+        "1year": "1y",
+        "all": "all",
+        "alltime": "all",
+        "max": "all",
+    }
+    return aliases.get(normalized)
+
+
+def resolve_history_window(
+    *,
+    range_value: str | None,
+    months: int,
+) -> tuple[date | None, int | None]:
+    normalized_range = normalize_history_range(range_value)
+    today = date.today()
+    if normalized_range == "1d":
+        return today - timedelta(days=21), 1
+    if normalized_range == "5d":
+        return today - timedelta(days=30), 5
+    if normalized_range == "1w":
+        return today - timedelta(days=10), None
+    if normalized_range == "1m":
+        return today - relativedelta(months=1), None
+    if normalized_range == "3m":
+        return today - relativedelta(months=3), None
+    if normalized_range == "6m":
+        return today - relativedelta(months=6), None
+    if normalized_range == "1y":
+        return today - relativedelta(years=1), None
+    if normalized_range == "all":
+        return None, None
+    return today - relativedelta(months=months), None
+
+
 async def background_stock_sync_loop() -> None:
     interval = max(1, settings.stock_sync_interval_seconds)
     while True:
@@ -331,18 +562,27 @@ async def background_stock_sync_loop() -> None:
         try:
             await asyncio.to_thread(sync_stocks, db, False)
             await asyncio.to_thread(refresh_market_status, db)
+            if await asyncio.to_thread(reference_cache_refresh_due, db):
+                await asyncio.to_thread(refresh_reference_caches, db)
             if settings.push_enabled:
-                result = await asyncio.to_thread(dispatch_portfolio_price_alerts, db, settings)
-                if result["alerts_sent"]:
+                result = await asyncio.to_thread(dispatch_market_price_alerts, db, settings)
+                if (
+                    result["market_open_alerts_sent"]
+                    or result["stock_alerts_sent"]
+                    or result["dividend_alerts_sent"]
+                ):
                     logger.info(
-                        "Sent %s portfolio push alerts to %s device tokens",
-                        result["alerts_sent"],
+                        "Sent %s market-open alerts, %s stock alerts, and %s dividend alerts to %s device tokens",
+                        result["market_open_alerts_sent"],
+                        result["stock_alerts_sent"],
+                        result["dividend_alerts_sent"],
                         result["tokens_sent"],
                     )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.exception("Background stock sync failed")
+            db.rollback()
             with suppress(Exception):
                 record_sync_log(
                     db,
@@ -399,6 +639,10 @@ def ensure_runtime_schema() -> None:
                 """
             )
         )
+        conn.execute(
+            text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS shares_outstanding NUMERIC(24, 2)")
+        )
+        conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS pe_ratio NUMERIC(14, 4)"))
 
 
 @app.on_event("startup")
@@ -454,6 +698,13 @@ def public_market_leaders(
     db: Session = Depends(get_db),
 ) -> dict:
     return market_leaders_payload(db, limit)
+
+
+@app.get("/public/market/news", response_model=list[MarketNewsOut], include_in_schema=False)
+def public_market_news(limit: int = Query(default=6, ge=1, le=20), db: Session = Depends(get_db)) -> list[dict]:
+    if not settings.ngxpulse_enabled:
+        return []
+    return get_cached_market_news(db, limit)
 
 
 @app.get("/public/privacy-policy", include_in_schema=False, response_class=HTMLResponse)
@@ -830,12 +1081,11 @@ def get_market_status(db: Session = Depends(get_db), _: User = Depends(get_curre
 
 
 @app.get("/market/snapshot", response_model=MarketSnapshotOut)
-def get_market_snapshot(_: User = Depends(get_current_user)) -> dict:
-    try:
-        return fetch_market_snapshot_cached()
-    except NgxFetchError as exc:
-        logger.warning("Market snapshot fetch failed: %s", exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+def get_market_snapshot(db: Session = Depends(get_db), _: User = Depends(get_current_user)) -> dict:
+    snapshot = get_cached_market_snapshot(db)
+    if snapshot is None:
+        raise HTTPException(status_code=503, detail="Market snapshot is not available yet")
+    return snapshot
 
 
 @app.get("/market/leaders", response_model=MarketLeadersOut)
@@ -845,6 +1095,17 @@ def get_market_leaders(
     _: User = Depends(get_current_user),
 ) -> dict:
     return market_leaders_payload(db, limit)
+
+
+@app.get("/market/news", response_model=list[MarketNewsOut])
+def get_market_news(
+    limit: int = Query(default=6, ge=1, le=20),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[dict]:
+    if not settings.ngxpulse_enabled:
+        return []
+    return get_cached_market_news(db, limit)
 
 
 @app.get("/market/ideas", response_model=MarketIdeasOut)
@@ -890,16 +1151,43 @@ def get_stock_company_news(
     ngx_id = ensure_stock_ngx_id(db, stock)
     if not ngx_id:
         return []
-    try:
-        return fetch_company_news_cached(ngx_id)[:limit]
-    except NgxFetchError as exc:
-        logger.warning("Company news fetch failed for %s: %s", stock.symbol, exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return get_cached_company_news(db, stock.symbol, ngx_id, limit)
+
+
+@app.get("/stocks/{symbol}/dividends", response_model=list[DividendHistoryOut])
+def get_stock_dividends(
+    symbol: str,
+    limit: int = Query(default=8, ge=1, le=50),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[dict]:
+    stock = db.get(Stock, symbol.strip().upper())
+    if stock is None:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    if not settings.ngxpulse_enabled:
+        return []
+    return get_cached_dividend_history(db, stock.symbol, limit)
+
+
+@app.get("/stocks/{symbol}/disclosures", response_model=list[DisclosureOut])
+def get_stock_disclosures(
+    symbol: str,
+    limit: int = Query(default=8, ge=1, le=50),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[dict]:
+    stock = db.get(Stock, symbol.strip().upper())
+    if stock is None:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    if not settings.ngxpulse_enabled:
+        return []
+    return get_cached_disclosures(db, stock.symbol, limit)
 
 
 @app.get("/stocks/{symbol}/history", response_model=list[StockPriceOut])
 def get_stock_history(
     symbol: str,
+    range: str | None = Query(default=None),
     months: int = Query(default=12, ge=1, le=120),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
@@ -908,22 +1196,32 @@ def get_stock_history(
     if stock is None:
         raise HTTPException(status_code=404, detail="Stock not found")
 
-    ngx_id = ensure_stock_ngx_id(db, stock)
-    since = date.today() - relativedelta(months=months)
-    rows = stock_history_query(db, symbol, since)
-    if ngx_id and (
-        not rows
-        or any(row.open_price is None for row in rows)
-        or stock_history_is_stale(rows)
+    ngx_id = stock.ngx_id if settings.ngxpulse_enabled else ensure_stock_ngx_id(db, stock)
+    normalized_range = normalize_history_range(range)
+    since, limit_trading_days = resolve_history_window(range_value=range, months=months)
+    rows = stock_history_query(db, symbol, since, limit_trading_days)
+    fetch_since = None if normalized_range == "all" else since
+    if stock.supports_history and stock_history_needs_backfill(
+        rows,
+        normalized_range=normalized_range,
+        since=since,
+        limit_trading_days=limit_trading_days,
     ):
-        upsert_stock_history(db, stock.symbol, ngx_id)
+        upsert_stock_history(
+            db,
+            stock.symbol,
+            ngx_id,
+            since=fetch_since,
+            allow_legacy_fallback=not settings.ngxpulse_enabled,
+        )
         db.commit()
-        rows = stock_history_query(db, symbol, since)
+        rows = stock_history_query(db, symbol, since, limit_trading_days)
     return rows
 
 
 def build_stock_detail(
     symbol: str,
+    range: str | None = Query(default=None),
     months: int = Query(default=12, ge=1, le=120),
     news_limit: int = Query(default=6, ge=1, le=20),
     db: Session = Depends(get_db),
@@ -933,54 +1231,69 @@ def build_stock_detail(
         raise HTTPException(status_code=404, detail="Stock not found")
 
     ngx_id = ensure_stock_ngx_id(db, stock)
-    since = date.today() - relativedelta(months=months)
-    rows = stock_history_query(db, symbol, since)
-    if ngx_id and (not rows or any(row.open_price is None for row in rows) or stock_history_is_stale(rows)):
-        upsert_stock_history(db, stock.symbol, ngx_id)
+    normalized_range = normalize_history_range(range)
+    since, limit_trading_days = resolve_history_window(range_value=range, months=months)
+    rows = stock_history_query(db, symbol, since, limit_trading_days)
+    fetch_since = None if normalized_range == "all" else since
+    if stock.supports_history and stock_history_needs_backfill(
+        rows,
+        normalized_range=normalized_range,
+        since=since,
+        limit_trading_days=limit_trading_days,
+    ):
+        upsert_stock_history(
+            db,
+            stock.symbol,
+            ngx_id,
+            since=fetch_since,
+            allow_legacy_fallback=not settings.ngxpulse_enabled,
+        )
         db.commit()
         db.refresh(stock)
-        rows = stock_history_query(db, symbol, since)
+        rows = stock_history_query(db, symbol, since, limit_trading_days)
 
-    market_snapshot = None
-    try:
-        market_snapshot = fetch_market_snapshot_cached()
-    except NgxFetchError as exc:
-        logger.warning("Market snapshot fetch failed for %s detail: %s", stock.symbol, exc)
+    market_snapshot = get_cached_market_snapshot(db)
 
-    news: list[dict] = []
-    if ngx_id:
-        try:
-            news = fetch_company_news_cached(ngx_id)[:news_limit]
-        except NgxFetchError as exc:
-            logger.warning("Company news fetch failed for %s detail: %s", stock.symbol, exc)
+    news = get_cached_company_news(db, stock.symbol, ngx_id, news_limit) if ngx_id else []
+
+    dividends: list[dict] = []
+    disclosures: list[dict] = []
+    if settings.ngxpulse_enabled:
+        dividends = get_cached_dividend_history(db, stock.symbol, 10)
+        disclosures = get_cached_disclosures(db, stock.symbol, news_limit)
 
     return {
         "stock": stock,
         "history": rows,
         "market_snapshot": market_snapshot,
+        "history_source": stock_history_source(stock),
         "news": news,
+        "dividends": dividends,
+        "disclosures": disclosures,
     }
 
 
 @app.get("/public/stocks/{symbol}/detail", response_model=StockDetailOut, include_in_schema=False)
 def get_public_stock_detail(
     symbol: str,
+    range: str | None = Query(default=None),
     months: int = Query(default=12, ge=1, le=120),
     news_limit: int = Query(default=6, ge=1, le=20),
     db: Session = Depends(get_db),
 ) -> dict:
-    return build_stock_detail(symbol, months, news_limit, db)
+    return build_stock_detail(symbol, range, months, news_limit, db)
 
 
 @app.get("/stocks/{symbol}/detail", response_model=StockDetailOut)
 def get_stock_detail(
     symbol: str,
+    range: str | None = Query(default=None),
     months: int = Query(default=12, ge=1, le=120),
     news_limit: int = Query(default=6, ge=1, le=20),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> dict:
-    return build_stock_detail(symbol, months, news_limit, db)
+    return build_stock_detail(symbol, range, months, news_limit, db)
 
 
 @app.post("/admin/sync/stocks", response_model=SyncResult)

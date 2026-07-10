@@ -10,6 +10,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'app_version.dart';
 import 'config.dart';
@@ -118,6 +119,38 @@ MarketStatusPalette marketStatusPalette(
             icon: Icons.lock_clock_outlined,
           );
   }
+  if (normalized.contains('PRE_OPEN')) {
+    return theme.brightness == Brightness.dark
+        ? const MarketStatusPalette(
+            base: Color(0xFFA3E635),
+            container: Color(0xFF233012),
+            content: Color(0xFFECFCCB),
+            icon: Icons.schedule_rounded,
+          )
+        : const MarketStatusPalette(
+            base: Color(0xFF65A30D),
+            container: Color(0xFFECFCCB),
+            content: Color(0xFF3F6212),
+            icon: Icons.schedule_rounded,
+          );
+  }
+  if (normalized == 'CLOSED' ||
+      normalized.contains('MARKET_CLOSED') ||
+      normalized.contains('CLOSED')) {
+    return theme.brightness == Brightness.dark
+        ? const MarketStatusPalette(
+            base: Color(0xFFF87171),
+            container: Color(0xFF32161A),
+            content: Color(0xFFFECACA),
+            icon: Icons.lock_clock_outlined,
+          )
+        : const MarketStatusPalette(
+            base: Color(0xFFDC2626),
+            container: Color(0xFFFEE2E2),
+            content: Color(0xFF991B1B),
+            icon: Icons.lock_clock_outlined,
+          );
+  }
   if (normalized.contains('START_INDEX')) {
     return theme.brightness == Brightness.dark
         ? const MarketStatusPalette(
@@ -133,19 +166,19 @@ MarketStatusPalette marketStatusPalette(
             icon: Icons.trending_up_rounded,
           );
   }
-  if (normalized.contains('PRE_OPEN')) {
+  if (normalized == 'OPEN' || normalized.contains('MARKET_OPEN')) {
     return theme.brightness == Brightness.dark
         ? const MarketStatusPalette(
-            base: Color(0xFFA3E635),
-            container: Color(0xFF233012),
-            content: Color(0xFFECFCCB),
-            icon: Icons.schedule_rounded,
+            base: Color(0xFF34D399),
+            container: Color(0xFF0F2A24),
+            content: Color(0xFFD1FAE5),
+            icon: Icons.trending_up_rounded,
           )
         : const MarketStatusPalette(
-            base: Color(0xFF65A30D),
-            container: Color(0xFFECFCCB),
-            content: Color(0xFF3F6212),
-            icon: Icons.schedule_rounded,
+            base: Color(0xFF059669),
+            container: Color(0xFFD1FAE5),
+            content: Color(0xFF065F46),
+            icon: Icons.trending_up_rounded,
           );
   }
   return theme.brightness == Brightness.dark
@@ -165,7 +198,119 @@ MarketStatusPalette marketStatusPalette(
 
 Color chartGridColor(ThemeData theme) => theme.brightness == Brightness.dark
     ? Colors.white.withValues(alpha: 0.09)
-    : theme.colorScheme.outlineVariant.withValues(alpha: 0.55);
+    : theme.colorScheme.outlineVariant.withValues(alpha: 0.38);
+
+class ChartAxisScale {
+  const ChartAxisScale({
+    this.minY = 0,
+    required this.maxY,
+    required this.interval,
+  });
+
+  final double minY;
+  final double maxY;
+  final double interval;
+}
+
+ChartAxisScale chartAxisScaleFromZero(
+  Iterable<double> values, {
+  int targetTicks = 4,
+}) {
+  final positiveValues = values.where((value) => value.isFinite && value > 0);
+  if (positiveValues.isEmpty) {
+    return const ChartAxisScale(maxY: 4, interval: 1);
+  }
+
+  final highest = positiveValues.reduce(max);
+  final roughInterval = highest / targetTicks;
+  final exponent = pow(10, (log(roughInterval) / ln10).floor()).toDouble();
+  final normalized = roughInterval / exponent;
+  final niceBase = normalized <= 1
+      ? 1.0
+      : normalized <= 2
+      ? 2.0
+      : normalized <= 5
+      ? 5.0
+      : 10.0;
+  final interval = niceBase * exponent;
+  final maxY = max(
+    interval * targetTicks,
+    (highest / interval).ceilToDouble() * interval,
+  );
+  return ChartAxisScale(maxY: maxY, interval: interval);
+}
+
+ChartAxisScale chartAxisScaleForPrices(
+  Iterable<double> values, {
+  int targetTicks = 4,
+}) {
+  final positiveValues = values.where((value) => value.isFinite && value > 0);
+  if (positiveValues.isEmpty) {
+    return const ChartAxisScale(maxY: 4, interval: 1);
+  }
+
+  final lowest = positiveValues.reduce(min);
+  final highest = positiveValues.reduce(max);
+  final spread = max(highest - lowest, max(highest * 0.025, 0.5));
+  final paddedMin = max(0, lowest - (spread * 0.18));
+  final paddedMax = highest + (spread * 0.18);
+  final roughInterval = max(0.1, (paddedMax - paddedMin) / targetTicks);
+  final exponent = pow(10, (log(roughInterval) / ln10).floor()).toDouble();
+  final normalized = roughInterval / exponent;
+  final niceBase = normalized <= 1
+      ? 1.0
+      : normalized <= 2
+      ? 2.0
+      : normalized <= 5
+      ? 5.0
+      : 10.0;
+  final interval = niceBase * exponent;
+  final snappedMax = (paddedMax / interval).ceilToDouble() * interval;
+  final maxY = interval >= 1 ? snappedMax.ceilToDouble() : snappedMax;
+  final candidateMin = maxY - (interval * targetTicks);
+  final minY = interval >= 1
+      ? max(0.0, candidateMin.floorToDouble())
+      : max(0.0, candidateMin);
+  return ChartAxisScale(minY: minY, maxY: maxY, interval: interval);
+}
+
+String chartAxisLabel(double value) {
+  if (value == 0) return '0';
+  if (value >= 10 || value == value.roundToDouble()) {
+    return NumberFormat('#,##0').format(value);
+  }
+  if ((value * 2).roundToDouble() == value * 2) {
+    return NumberFormat('#,##0.#').format(value);
+  }
+  return NumberFormat('#,##0.##').format(value);
+}
+
+DateTime currentWatTime() =>
+    DateTime.now().toUtc().add(const Duration(hours: 1));
+
+bool isMarketHoursWat(DateTime moment) {
+  if (moment.weekday == DateTime.saturday ||
+      moment.weekday == DateTime.sunday) {
+    return false;
+  }
+  final minutes = (moment.hour * 60) + moment.minute;
+  return minutes >= (9 * 60) && minutes < (16 * 60);
+}
+
+bool isSameWatDate(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
+
+Future<void> openExternalUrl(BuildContext context, String url) async {
+  final uri = Uri.tryParse(url.trim());
+  if (uri == null) {
+    showError(context, 'Could not open link: $url');
+    return;
+  }
+  final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+  if (!launched && context.mounted) {
+    showError(context, 'Could not open link: $url');
+  }
+}
 
 String normalizeApiBaseUrl(String value) {
   final trimmed = value.trim().replaceAll(RegExp(r'/+$'), '');
@@ -254,22 +399,28 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
           seedColor: _seedColor,
           brightness: Brightness.light,
         ).copyWith(
-          primary: const Color(0xFF007A68),
-          secondary: const Color(0xFF00A86B),
-          tertiary: const Color(0xFF145BFF),
+          primary: const Color(0xFF0A8F74),
+          secondary: const Color(0xFFFF8A5B),
+          tertiary: const Color(0xFF2B67F6),
+          primaryContainer: const Color(0xFFC8F5E4),
+          secondaryContainer: const Color(0xFFFFDFC7),
+          tertiaryContainer: const Color(0xFFDCE6FF),
           surface: Colors.white,
-          surfaceContainerHighest: const Color(0xFFE6F0ED),
+          surfaceContainerHighest: const Color(0xFFF1F7F4),
         );
     final darkScheme =
         ColorScheme.fromSeed(
           seedColor: _seedColor,
           brightness: Brightness.dark,
         ).copyWith(
-          primary: const Color(0xFF38E2A2),
-          secondary: const Color(0xFF68F0C0),
-          tertiary: const Color(0xFF69A7FF),
+          primary: const Color(0xFF5DEBB7),
+          secondary: const Color(0xFFFFA97A),
+          tertiary: const Color(0xFF8AB6FF),
+          primaryContainer: const Color(0xFF11493E),
+          secondaryContainer: const Color(0xFF5E3426),
+          tertiaryContainer: const Color(0xFF1C3B72),
           surface: _darkSurface,
-          surfaceContainerHighest: const Color(0xFF15262B),
+          surfaceContainerHighest: const Color(0xFF1A2B31),
         );
 
     return MaterialApp(
@@ -281,37 +432,39 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
         colorScheme: lightScheme,
         scaffoldBackgroundColor: _lightScaffold,
         appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFFE5F0EE),
-          foregroundColor: Color(0xFF10231D),
+          backgroundColor: Color(0xFFFFFFFF),
+          foregroundColor: Color(0xFF0F172A),
           elevation: 0,
+          surfaceTintColor: Colors.transparent,
+          shadowColor: Colors.transparent,
         ),
         navigationBarTheme: NavigationBarThemeData(
-          backgroundColor: const Color(0xFFF8FBFC),
-          indicatorColor: const Color(0xFFD3F3E5),
+          backgroundColor: const Color(0xFFFFFFFF),
+          indicatorColor: const Color(0xFFC8F5E4),
           iconTheme: WidgetStateProperty.resolveWith((states) {
             final selected = states.contains(WidgetState.selected);
             return IconThemeData(
               color: selected
-                  ? const Color(0xFF007A68)
-                  : const Color(0xFF445B57),
+                  ? const Color(0xFF0A8F74)
+                  : const Color(0xFF4A5F5C),
             );
           }),
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
             final selected = states.contains(WidgetState.selected);
             return TextStyle(
               color: selected
-                  ? const Color(0xFF007A68)
-                  : const Color(0xFF445B57),
+                  ? const Color(0xFF0A8F74)
+                  : const Color(0xFF4A5F5C),
               fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
             );
           }),
         ),
         navigationRailTheme: const NavigationRailThemeData(
-          backgroundColor: Color(0xFFEAF4F1),
-          indicatorColor: Color(0xFFD3F3E5),
-          selectedIconTheme: IconThemeData(color: Color(0xFF007A68)),
+          backgroundColor: Color(0xFFEFF8F4),
+          indicatorColor: Color(0xFFC8F5E4),
+          selectedIconTheme: IconThemeData(color: Color(0xFF0A8F74)),
           selectedLabelTextStyle: TextStyle(
-            color: Color(0xFF007A68),
+            color: Color(0xFF0A8F74),
             fontWeight: FontWeight.w700,
           ),
         ),
@@ -324,7 +477,7 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
           ),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(18),
-            borderSide: const BorderSide(color: Color(0xFFD7E2DE)),
+            borderSide: const BorderSide(color: Color(0xFFD6E5E2)),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(18),
@@ -341,9 +494,11 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
         ),
         cardTheme: const CardThemeData(
           elevation: 0,
+          color: Color(0xFFFFFFFF),
+          surfaceTintColor: Colors.transparent,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(24)),
-            side: BorderSide(color: Color(0xFFD9E5EC)),
+            borderRadius: BorderRadius.all(Radius.circular(16)),
+            side: BorderSide(color: Color(0xFFE2E8F0)),
           ),
         ),
       ),
@@ -353,38 +508,38 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
         scaffoldBackgroundColor: _darkScaffold,
         canvasColor: _darkScaffold,
         appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF121C20),
-          foregroundColor: Color(0xFFE6F4EF),
+          backgroundColor: Color(0xFF162025),
+          foregroundColor: Color(0xFFF0FAF5),
           elevation: 0,
         ),
         navigationBarTheme: NavigationBarThemeData(
-          backgroundColor: const Color(0xFF10181C),
-          indicatorColor: const Color(0xFF114639),
+          backgroundColor: const Color(0xFF121A1E),
+          indicatorColor: const Color(0xFF134C40),
           iconTheme: WidgetStateProperty.resolveWith((states) {
             final selected = states.contains(WidgetState.selected);
             return IconThemeData(
               color: selected
-                  ? const Color(0xFF68F0C0)
-                  : const Color(0xFF91ABA3),
+                  ? const Color(0xFF73F3C5)
+                  : const Color(0xFF9AB0A9),
             );
           }),
           labelTextStyle: WidgetStateProperty.resolveWith((states) {
             final selected = states.contains(WidgetState.selected);
             return TextStyle(
               color: selected
-                  ? const Color(0xFF68F0C0)
-                  : const Color(0xFF92AAA4),
+                  ? const Color(0xFF73F3C5)
+                  : const Color(0xFF9AB0A9),
               fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
             );
           }),
         ),
         navigationRailTheme: const NavigationRailThemeData(
-          backgroundColor: Color(0xFF10181C),
-          indicatorColor: Color(0xFF114639),
-          selectedIconTheme: IconThemeData(color: Color(0xFF68F0C0)),
+          backgroundColor: Color(0xFF121A1E),
+          indicatorColor: Color(0xFF134C40),
+          selectedIconTheme: IconThemeData(color: Color(0xFF73F3C5)),
           unselectedIconTheme: IconThemeData(color: Color(0xFF9DB1AB)),
           selectedLabelTextStyle: TextStyle(
-            color: Color(0xFF68F0C0),
+            color: Color(0xFF73F3C5),
             fontWeight: FontWeight.w700,
           ),
           unselectedLabelTextStyle: TextStyle(color: Color(0xFF9DB1AB)),
@@ -505,7 +660,11 @@ class ApiClient {
   String get accountDeletionUrl => '$baseUrl/public/account-deletion';
 
   Uri _uri(String path, [Map<String, String>? query]) {
-    return Uri.parse('$baseUrl$path').replace(queryParameters: query);
+    final merged = <String, String>{
+      if (query != null) ...query,
+      '_ts': DateTime.now().millisecondsSinceEpoch.toString(),
+    };
+    return Uri.parse('$baseUrl$path').replace(queryParameters: merged);
   }
 
   Future<void> register(String email, String password, String? fullName) async {
@@ -751,9 +910,9 @@ class ApiClient {
     _expect(response, 204);
   }
 
-  Future<List<PricePoint>> history(String symbol, {int months = 12}) async {
+  Future<List<PricePoint>> history(String symbol, {String range = '1y'}) async {
     final response = await _client.get(
-      _uri('/stocks/$symbol/history', {'months': '$months'}),
+      _uri('/stocks/$symbol/history', {'range': range}),
       headers: _headers,
     );
     _expect(response, 200);
@@ -763,9 +922,31 @@ class ApiClient {
         .toList();
   }
 
-  Future<StockDetailBundle> stockDetail(String symbol) async {
+  Future<List<DividendRecord>> dividends(
+    String symbol, {
+    int limit = 10,
+  }) async {
     final response = await _client.get(
-      _uri('/stocks/$symbol/detail', {'months': '12', 'news_limit': '6'}),
+      _uri('/stocks/$symbol/dividends', {'limit': '$limit'}),
+      headers: _headers,
+    );
+    _expect(response, 200);
+    final data = jsonDecode(response.body) as List<dynamic>;
+    return data
+        .map((item) => DividendRecord.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<StockDetailBundle> stockDetail(
+    String symbol, {
+    String range = '1y',
+    int newsLimit = 6,
+  }) async {
+    final response = await _client.get(
+      _uri('/stocks/$symbol/detail', {
+        'range': range,
+        'news_limit': '$newsLimit',
+      }),
       headers: _headers,
     );
     _expect(response, 200);
@@ -774,11 +955,15 @@ class ApiClient {
     );
   }
 
-  Future<StockDetailBundle> publicStockDetail(String symbol) async {
+  Future<StockDetailBundle> publicStockDetail(
+    String symbol, {
+    String range = '1y',
+    int newsLimit = 6,
+  }) async {
     final response = await _client.get(
       _uri('/public/stocks/$symbol/detail', {
-        'months': '12',
-        'news_limit': '6',
+        'range': range,
+        'news_limit': '$newsLimit',
       }),
       headers: _headers,
     );
@@ -803,13 +988,14 @@ class ApiClient {
       return message;
     }
     final historyRows = (data['history_rows_upserted'] as num?)?.toInt() ?? 0;
+    final sourceLabel = syncSourceLabel(data['source']?.toString());
     if (includeHistory) {
-      return 'Synced ${data['stocks_upserted']} stocks from ${data['source']} and refreshed $historyRows history rows';
+      return 'Synced ${data['stocks_upserted']} stocks from $sourceLabel and refreshed $historyRows history rows';
     }
     if (historyRows > 0) {
-      return 'Synced ${data['stocks_upserted']} stocks from ${data['source']} and updated $historyRows daily snapshots';
+      return 'Synced ${data['stocks_upserted']} stocks from $sourceLabel and updated $historyRows daily snapshots';
     }
-    return 'Synced ${data['stocks_upserted']} stocks from ${data['source']}';
+    return 'Synced ${data['stocks_upserted']} stocks from $sourceLabel';
   }
 
   Future<SyncStatus> syncStatus() async {
@@ -924,6 +1110,29 @@ class ApiClient {
     );
   }
 
+  Future<List<MarketNewsItem>> marketNews({int limit = 6}) async {
+    final response = await _client.get(
+      _uri('/market/news', {'limit': '$limit'}),
+      headers: _headers,
+    );
+    _expect(response, 200);
+    final data = jsonDecode(response.body) as List<dynamic>;
+    return data
+        .map((item) => MarketNewsItem.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
+  Future<List<MarketNewsItem>> publicMarketNews({int limit = 6}) async {
+    final response = await _client.get(
+      _uri('/public/market/news', {'limit': '$limit'}),
+    );
+    _expect(response, 200);
+    final data = jsonDecode(response.body) as List<dynamic>;
+    return data
+        .map((item) => MarketNewsItem.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
   Future<List<CompanyNewsItem>> companyNews(String symbol) async {
     final response = await _client.get(
       _uri('/stocks/$symbol/company-news', {'limit': '5'}),
@@ -965,8 +1174,64 @@ String? blankToNull(String value) {
   return trimmed.isEmpty ? null : trimmed;
 }
 
-String stockPickerLabel(Stock stock) =>
-    blankToNull(stock.name ?? '') ?? stock.symbol;
+String stockPickerLabel(Stock stock) {
+  final displayName = blankToNull(stock.name ?? '');
+  if (displayName == null || displayName == stock.symbol) {
+    return stock.symbol;
+  }
+  return '${stock.symbol} - $displayName';
+}
+
+enum StockHistoryRange {
+  oneDay('1d', '1D'),
+  fiveDays('5d', '5D'),
+  oneWeek('1w', '1W'),
+  oneMonth('1m', '1M'),
+  threeMonths('3m', '3M'),
+  sixMonths('6m', '6M'),
+  oneYear('1y', '1Y'),
+  all('all', 'ALL');
+
+  const StockHistoryRange(this.queryValue, this.label);
+
+  final String queryValue;
+  final String label;
+}
+
+String friendlyMarketStatusLabel(String status) {
+  final normalized = status.trim().toUpperCase().replaceAll('-', '_');
+  if (normalized.isEmpty || normalized == 'UNKNOWN') {
+    return 'Market status unavailable';
+  }
+  if (normalized.contains('PRE_OPEN')) return 'Pre-open';
+  if (normalized.contains('START_INDEX') ||
+      normalized == 'OPEN' ||
+      normalized.contains('MARKET_OPEN')) {
+    return 'Market Open';
+  }
+  if (normalized.contains('STP') ||
+      normalized.contains('STOP') ||
+      normalized.contains('CLOSED') ||
+      normalized.contains('END_OF_DAY')) {
+    return 'Market Closed';
+  }
+  return status;
+}
+
+String syncSourceLabel(String? source) {
+  switch (source) {
+    case 'ngxpulse':
+      return 'NGX Pulse market feed';
+    case 'ngxpulse_history':
+      return 'NGX Pulse historical prices';
+    case 'database_cache':
+      return 'Cached database snapshot';
+    case 'ngx_chart':
+      return 'Legacy NGX chart feed';
+    default:
+      return source ?? 'Unknown';
+  }
+}
 
 ImageProvider<Object>? profileImageProvider(String? value) {
   final trimmed = value?.trim();
@@ -1000,8 +1265,11 @@ class Stock {
     this.margin,
     this.volume,
     this.marketCap,
+    this.peRatio,
+    this.sharesOutstanding,
     this.sector,
     this.ngxId,
+    this.supportsHistory = false,
     this.updatedAt,
   });
 
@@ -1014,11 +1282,14 @@ class Stock {
   final double? margin;
   final double? volume;
   final double? marketCap;
+  final double? peRatio;
+  final double? sharesOutstanding;
   final String? sector;
   final String? ngxId;
+  final bool supportsHistory;
   final DateTime? updatedAt;
 
-  bool get hasChart => ngxId != null && ngxId!.isNotEmpty;
+  bool get hasChart => supportsHistory;
 
   factory Stock.fromJson(Map<String, dynamic> json) {
     return Stock(
@@ -1031,8 +1302,11 @@ class Stock {
       margin: asDouble(json['margin']),
       volume: asDouble(json['volume']),
       marketCap: asDouble(json['market_cap']),
+      peRatio: asDouble(json['pe_ratio']),
+      sharesOutstanding: asDouble(json['shares_outstanding']),
       sector: json['sector'] as String?,
       ngxId: json['ngx_id'] as String?,
+      supportsHistory: json['supports_history'] == true,
       updatedAt: json['updated_at'] == null
           ? null
           : DateTime.tryParse(json['updated_at'] as String),
@@ -1099,17 +1373,25 @@ class StockDetailBundle {
     required this.stock,
     required this.history,
     this.marketSnapshot,
+    this.historySource,
     required this.news,
+    required this.dividends,
+    required this.disclosures,
   });
 
   final Stock stock;
   final List<PricePoint> history;
   final MarketSnapshot? marketSnapshot;
+  final String? historySource;
   final List<CompanyNewsItem> news;
+  final List<DividendRecord> dividends;
+  final List<DisclosureItem> disclosures;
 
   factory StockDetailBundle.fromJson(Map<String, dynamic> json) {
     final historyJson = json['history'] as List<dynamic>? ?? const [];
     final newsJson = json['news'] as List<dynamic>? ?? const [];
+    final dividendsJson = json['dividends'] as List<dynamic>? ?? const [];
+    final disclosuresJson = json['disclosures'] as List<dynamic>? ?? const [];
     return StockDetailBundle(
       stock: Stock.fromJson(json['stock'] as Map<String, dynamic>),
       history: historyJson
@@ -1120,8 +1402,15 @@ class StockDetailBundle {
           : MarketSnapshot.fromJson(
               json['market_snapshot'] as Map<String, dynamic>,
             ),
+      historySource: json['history_source'] as String?,
       news: newsJson
           .map((item) => CompanyNewsItem.fromJson(item as Map<String, dynamic>))
+          .toList(),
+      dividends: dividendsJson
+          .map((item) => DividendRecord.fromJson(item as Map<String, dynamic>))
+          .toList(),
+      disclosures: disclosuresJson
+          .map((item) => DisclosureItem.fromJson(item as Map<String, dynamic>))
           .toList(),
     );
   }
@@ -1202,6 +1491,7 @@ class HoldingInput {
     this.manualName,
     this.manualCurrentPrice,
     this.notes,
+    this.mergeWithExisting = true,
   });
 
   final String symbol;
@@ -1210,6 +1500,7 @@ class HoldingInput {
   final String? manualName;
   final double? manualCurrentPrice;
   final String? notes;
+  final bool mergeWithExisting;
 
   Map<String, dynamic> toJson() => {
     'stock_symbol': symbol,
@@ -1218,6 +1509,7 @@ class HoldingInput {
     'manual_name': manualName,
     'manual_current_price': manualCurrentPrice,
     'notes': notes,
+    'merge_with_existing': mergeWithExisting,
   };
 }
 
@@ -1312,17 +1604,35 @@ class ProfileInput {
 }
 
 class PricePoint {
-  PricePoint({required this.date, required this.open, required this.close});
+  PricePoint({
+    required this.date,
+    required this.open,
+    required this.high,
+    required this.low,
+    required this.close,
+    this.volume,
+  });
 
   final DateTime date;
   final double open;
+  final double high;
+  final double low;
   final double close;
+  final double? volume;
+
+  bool get isBullish => close >= open;
 
   factory PricePoint.fromJson(Map<String, dynamic> json) {
+    final open =
+        asDouble(json['open_price']) ?? asDouble(json['close_price']) ?? 0;
+    final close = asDouble(json['close_price']) ?? open;
     return PricePoint(
       date: DateTime.parse(json['trade_date'] as String),
-      open: asDouble(json['open_price']) ?? asDouble(json['close_price']) ?? 0,
-      close: asDouble(json['close_price']) ?? 0,
+      open: open,
+      high: asDouble(json['high_price']) ?? max(open, close),
+      low: asDouble(json['low_price']) ?? min(open, close),
+      close: close,
+      volume: asDouble(json['volume']),
     );
   }
 }
@@ -1408,10 +1718,15 @@ class MarketLeaders {
 }
 
 class LandingMarketData {
-  LandingMarketData({required this.status, required this.leaders});
+  LandingMarketData({
+    required this.status,
+    required this.leaders,
+    required this.news,
+  });
 
   final MarketStatus status;
   final MarketLeaders leaders;
+  final List<MarketNewsItem> news;
 }
 
 class PushStatusSummary {
@@ -1464,6 +1779,112 @@ class CompanyNewsItem {
           : DateTime.tryParse(json['modified'] as String),
       ngxId: json['ngx_id'] as String?,
       submissionType: json['submission_type'] as String?,
+    );
+  }
+}
+
+class DividendRecord {
+  DividendRecord({
+    this.symbol,
+    this.companyName,
+    this.exDividendDate,
+    this.recordDate,
+    this.payDate,
+    this.dividendPerShare,
+    this.currency,
+  });
+
+  final String? symbol;
+  final String? companyName;
+  final DateTime? exDividendDate;
+  final DateTime? recordDate;
+  final DateTime? payDate;
+  final double? dividendPerShare;
+  final String? currency;
+
+  factory DividendRecord.fromJson(Map<String, dynamic> json) {
+    return DividendRecord(
+      symbol: json['symbol'] as String?,
+      companyName: json['company_name'] as String?,
+      exDividendDate: json['ex_dividend_date'] == null
+          ? null
+          : DateTime.tryParse(json['ex_dividend_date'] as String),
+      recordDate: json['record_date'] == null
+          ? null
+          : DateTime.tryParse(json['record_date'] as String),
+      payDate: json['pay_date'] == null
+          ? null
+          : DateTime.tryParse(json['pay_date'] as String),
+      dividendPerShare: asDouble(json['dividend_per_share']),
+      currency: json['currency'] as String?,
+    );
+  }
+}
+
+class DisclosureItem {
+  DisclosureItem({
+    this.title,
+    this.url,
+    this.publishedAt,
+    this.symbol,
+    this.companyName,
+    this.category,
+    this.summary,
+    this.source,
+  });
+
+  final String? title;
+  final String? url;
+  final DateTime? publishedAt;
+  final String? symbol;
+  final String? companyName;
+  final String? category;
+  final String? summary;
+  final String? source;
+
+  factory DisclosureItem.fromJson(Map<String, dynamic> json) {
+    return DisclosureItem(
+      title: json['title'] as String?,
+      url: json['url'] as String?,
+      publishedAt: json['published_at'] == null
+          ? null
+          : DateTime.tryParse(json['published_at'] as String),
+      symbol: json['symbol'] as String?,
+      companyName: json['company_name'] as String?,
+      category: json['category'] as String?,
+      summary: json['summary'] as String?,
+      source: json['source'] as String?,
+    );
+  }
+}
+
+class MarketNewsItem {
+  MarketNewsItem({
+    this.title,
+    this.url,
+    this.publishedAt,
+    this.source,
+    this.summary,
+    this.imageUrl,
+  });
+
+  final String? title;
+  final String? url;
+  final DateTime? publishedAt;
+  final String? source;
+  final String? summary;
+  final String? imageUrl;
+
+  factory MarketNewsItem.fromJson(Map<String, dynamic> json) {
+    return MarketNewsItem(
+      title: json['title'] as String?,
+      url: json['url'] as String?,
+      publishedAt: json['published_at'] == null
+          ? null
+          : DateTime.tryParse(json['published_at'] as String),
+      source: json['source'] as String?,
+      summary: json['summary'] as String?,
+      imageUrl: json['image_url'] as String?,
     );
   }
 }
@@ -1632,7 +2053,13 @@ class _AuthScreenState extends State<AuthScreen> {
   Future<LandingMarketData> _loadLandingData() async {
     final status = await widget.api.publicMarketStatus();
     final leaders = await widget.api.publicMarketLeaders(limit: 6);
-    return LandingMarketData(status: status, leaders: leaders);
+    List<MarketNewsItem> news = const [];
+    try {
+      news = await widget.api.publicMarketNews(limit: 6);
+    } catch (_) {
+      news = const [];
+    }
+    return LandingMarketData(status: status, leaders: leaders, news: news);
   }
 
   bool _validateAuthForm() {
@@ -2189,7 +2616,7 @@ class _LandingMarketView extends StatelessWidget {
                         Text(
                           landing == null
                               ? 'Market pulse loading'
-                              : 'Market status: ${landing!.status.status}',
+                              : 'Market status: ${friendlyMarketStatusLabel(landing!.status.status)}',
                           style: TextStyle(
                             color: statusPalette.content,
                             fontWeight: FontWeight.w700,
@@ -2305,6 +2732,15 @@ class _LandingMarketView extends StatelessWidget {
             );
           },
         ),
+        if (landing?.news.isNotEmpty == true) ...[
+          const SizedBox(height: 16),
+          MarketNewsPanel(
+            title: 'Market news',
+            subtitle:
+                'Latest NGX Pulse headlines are available on web and mobile from the same feed.',
+            news: landing!.news,
+          ),
+        ],
       ],
     );
   }
@@ -2457,9 +2893,7 @@ class _LandingPulseChart extends StatelessWidget {
       );
     }
 
-    final minY = allY.reduce(min);
-    final maxY = allY.reduce(max);
-    final padding = max(0.5, (maxY - minY) * 0.16);
+    final axisScale = chartAxisScaleFromZero(allY);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2467,15 +2901,6 @@ class _LandingPulseChart extends StatelessWidget {
         final labels = compact
             ? {0: 'Open', 9: 'Now'}
             : {0: 'Open', 4: 'Noon', 9: 'Now'};
-        String axisLabel(double value) {
-          if (value >= 1000) {
-            return '₦${compactFormat.format(value)}';
-          }
-          return value >= 10
-              ? '₦${value.toStringAsFixed(0)}'
-              : '₦${value.toStringAsFixed(2)}';
-        }
-
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2499,13 +2924,16 @@ class _LandingPulseChart extends StatelessWidget {
                 LineChartData(
                   minX: 0,
                   maxX: 9,
-                  minY: minY - padding,
-                  maxY: maxY + padding,
+                  minY: 0,
+                  maxY: axisScale.maxY,
                   borderData: FlBorderData(show: false),
                   gridData: FlGridData(
                     show: true,
-                    drawVerticalLine: false,
+                    drawVerticalLine: true,
+                    verticalInterval: compact ? 3 : 2,
                     getDrawingHorizontalLine: (_) =>
+                        FlLine(color: chartGridColor(theme), strokeWidth: 1),
+                    getDrawingVerticalLine: (_) =>
                         FlLine(color: chartGridColor(theme), strokeWidth: 1),
                   ),
                   titlesData: FlTitlesData(
@@ -2541,11 +2969,11 @@ class _LandingPulseChart extends StatelessWidget {
                       sideTitles: SideTitles(
                         showTitles: true,
                         reservedSize: compact ? 44 : 52,
-                        interval: max(1.0, (maxY - minY) / 3),
+                        interval: axisScale.interval,
                         getTitlesWidget: (value, meta) => Padding(
                           padding: const EdgeInsets.only(right: 8),
                           child: Text(
-                            axisLabel(value),
+                            chartAxisLabel(value),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.labelSmall?.copyWith(
@@ -2978,7 +3406,7 @@ class ThemeModeButton extends StatelessWidget {
   }
 }
 
-class LandingStockDetailSheet extends StatelessWidget {
+class LandingStockDetailSheet extends StatefulWidget {
   const LandingStockDetailSheet({
     super.key,
     required this.api,
@@ -2989,12 +3417,36 @@ class LandingStockDetailSheet extends StatelessWidget {
   final Stock stock;
 
   @override
+  State<LandingStockDetailSheet> createState() =>
+      _LandingStockDetailSheetState();
+}
+
+class _LandingStockDetailSheetState extends State<LandingStockDetailSheet> {
+  late StockHistoryRange selectedRange = StockHistoryRange.oneYear;
+  late Future<StockDetailBundle> detailFuture = _loadDetail();
+
+  Future<StockDetailBundle> _loadDetail() {
+    return widget.api.publicStockDetail(
+      widget.stock.symbol,
+      range: selectedRange.queryValue,
+    );
+  }
+
+  void selectRange(StockHistoryRange range) {
+    if (range == selectedRange) return;
+    setState(() {
+      selectedRange = range;
+      detailFuture = _loadDetail();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return FutureBuilder<StockDetailBundle>(
-      future: api.publicStockDetail(stock.symbol),
+      future: detailFuture,
       builder: (context, snapshot) {
         final detail = snapshot.data;
-        final resolvedStock = detail?.stock ?? stock;
+        final resolvedStock = detail?.stock ?? widget.stock;
         final points = detail?.history ?? [];
         final hasIntradayFallback =
             points.isEmpty &&
@@ -3003,6 +3455,8 @@ class LandingStockDetailSheet extends StatelessWidget {
         final latest = points.isEmpty ? null : points.last;
         final marketSnapshot = detail?.marketSnapshot;
         final news = detail?.news ?? [];
+        final dividends = detail?.dividends ?? [];
+        final disclosures = detail?.disclosures ?? [];
         final loading = snapshot.connectionState == ConnectionState.waiting;
 
         return Material(
@@ -3041,18 +3495,43 @@ class LandingStockDetailSheet extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  SizedBox(
-                    height: 240,
-                    child: loading
-                        ? const Center(child: CircularProgressIndicator())
-                        : hasIntradayFallback
-                        ? _LandingPulseChart(stocks: [resolvedStock])
-                        : points.isEmpty
-                        ? const EmptyState(
-                            icon: Icons.show_chart,
-                            text: 'No chart data available yet.',
-                          )
-                        : PriceChart(points: points),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: StockHistoryRange.values
+                        .map(
+                          (range) => ChoiceChip(
+                            label: Text(range.label),
+                            selected: selectedRange == range,
+                            onSelected: (_) => selectRange(range),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                  const SizedBox(height: 12),
+                  loading
+                      ? const Center(child: CircularProgressIndicator())
+                      : hasIntradayFallback
+                      ? _LandingPulseChart(stocks: [resolvedStock])
+                      : points.isEmpty
+                      ? const EmptyState(
+                          icon: Icons.show_chart,
+                          text: 'No chart data available yet.',
+                        )
+                      : PriceChart(
+                          points: points,
+                          symbolLabel: resolvedStock.symbol,
+                          rangeLabel: selectedRange.label,
+                          showSummaryMetrics: false,
+                        ),
+                  const SizedBox(height: 8),
+                  Text(
+                    detail?.historySource == 'ngxpulse_history'
+                        ? 'Powered by NGX Pulse historical daily prices and cached inside Stockfolio.'
+                        : 'Chart history is loaded from the available market data feed for this stock.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
                   const SizedBox(height: 16),
                   Wrap(
@@ -3109,6 +3588,34 @@ class LandingStockDetailSheet extends StatelessWidget {
                       ),
                     ],
                   ),
+                  const SizedBox(height: 18),
+                  Text(
+                    'Dividend history',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  if (dividends.isEmpty)
+                    Text(
+                      loading
+                          ? 'Loading dividend history...'
+                          : 'No recent dividend history available.',
+                    )
+                  else
+                    ...dividends.map((item) => DividendTile(item: item)),
+                  const SizedBox(height: 18),
+                  Text(
+                    'Recent disclosures',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 8),
+                  if (disclosures.isEmpty)
+                    Text(
+                      loading
+                          ? 'Loading disclosures...'
+                          : 'No recent disclosures available.',
+                    )
+                  else
+                    ...disclosures.map((item) => DisclosureTile(item: item)),
                   const SizedBox(height: 18),
                   Text(
                     'Company updates',
@@ -3168,6 +3675,8 @@ class _DashboardShellState extends State<DashboardShell> {
   DateTime? webSessionDeadline;
   bool webSessionExtended = false;
   bool sessionPromptOpen = false;
+  bool webSessionEnding = false;
+  bool webSessionExpiredMessageShown = false;
   bool hideFinancialValues = false;
 
   @override
@@ -3223,6 +3732,7 @@ class _DashboardShellState extends State<DashboardShell> {
     setState(() {
       webSessionDeadline = deadline;
       webSessionExtended = extended;
+      webSessionExpiredMessageShown = false;
     });
     _handleWebSessionTick();
   }
@@ -3250,33 +3760,15 @@ class _DashboardShellState extends State<DashboardShell> {
     if (!mounted ||
         !kIsWeb ||
         webSessionDeadline == null ||
-        sessionPromptOpen) {
+        sessionPromptOpen ||
+        webSessionEnding) {
       return;
     }
     final remaining = webSessionDeadline!.difference(DateTime.now());
     if (remaining.isNegative || remaining.inSeconds == 0) {
       if (!webSessionExtended) {
         sessionPromptOpen = true;
-        final extend = await showDialog<bool>(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) => AlertDialog(
-            title: const Text('Session expired'),
-            content: const Text(
-              'Your web session has reached 1 hour. Extend it once for another 30 minutes?',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('Log out'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('Extend 30 mins'),
-              ),
-            ],
-          ),
-        );
+        final extend = await _promptWebSessionExtension();
         sessionPromptOpen = false;
         if (extend == true) {
           final prefs = await SharedPreferences.getInstance();
@@ -3290,19 +3782,90 @@ class _DashboardShellState extends State<DashboardShell> {
           setState(() {
             webSessionDeadline = nextDeadline;
             webSessionExtended = true;
+            webSessionExpiredMessageShown = false;
           });
           showMessage(context, 'Session extended for 30 minutes.');
           return;
         }
       }
-      if (!mounted) return;
-      showMessage(context, 'Your web session has ended. Please sign in again.');
-      await widget.onSignOut();
+      await _endExpiredWebSession();
       return;
     }
     if (mounted) {
       setState(() {});
     }
+  }
+
+  Future<bool?> _promptWebSessionExtension() async {
+    var secondsLeft = 10;
+    var dialogOpen = true;
+    BuildContext? dialogContext;
+    late void Function(VoidCallback fn) setDialogState;
+    final timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!dialogOpen) {
+        timer.cancel();
+        return;
+      }
+      secondsLeft -= 1;
+      if (secondsLeft <= 0) {
+        timer.cancel();
+        if (dialogContext != null && Navigator.of(dialogContext!).canPop()) {
+          Navigator.of(dialogContext!).pop(false);
+        }
+        return;
+      }
+      if (dialogContext != null) {
+        setDialogState(() {});
+      }
+    });
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        dialogContext = context;
+        return StatefulBuilder(
+          builder: (context, setState) {
+            setDialogState = setState;
+            return AlertDialog(
+              title: const Text('Session expired'),
+              content: Text(
+                'Your web session has reached 1 hour. Extend it once for another 30 minutes?\n\nAuto sign out in ${secondsLeft}s.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Log out'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('Extend 30 mins'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    dialogOpen = false;
+    timer.cancel();
+    return result;
+  }
+
+  Future<void> _endExpiredWebSession() async {
+    if (!mounted || webSessionEnding) return;
+    webSessionEnding = true;
+    if (mounted) {
+      setState(() {
+        sessionPromptOpen = false;
+        webSessionDeadline = null;
+      });
+    }
+    if (!webSessionExpiredMessageShown) {
+      webSessionExpiredMessageShown = true;
+      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      showMessage(context, 'Session expired. Sign in to continue.');
+    }
+    await widget.onSignOut();
   }
 
   String? get sessionCountdownLabel {
@@ -3436,6 +3999,79 @@ class _DashboardShellState extends State<DashboardShell> {
     setState(() => index = nextIndex);
   }
 
+  Future<void> _showAboutScreen() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => const LegalDocumentScreen(
+          title: 'About Stockfolio NG',
+          sections: [
+            LegalSection(
+              heading: 'What it does',
+              body:
+                  'Stockfolio NG helps you follow Nigerian equities with daily charts, market leaders, portfolio tracking, and push alerts for major market moves.',
+            ),
+            LegalSection(
+              heading: 'How market data is used',
+              body:
+                  'The app combines NGX market snapshots, stored daily price history, and company information to show price patterns, opening-versus-current movement, and account-level portfolio views.',
+            ),
+            LegalSection(
+              heading: 'Why alerts matter',
+              body:
+                  'Push alerts are designed to highlight market-open activity and notable stock moves quickly so users can return to the app and inspect charts, watchlists, and stock detail screens.',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showFaqScreen() async {
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => LegalDocumentScreen(
+          title: 'FAQ',
+          sections: [
+            const LegalSection(
+              heading: 'Why do some charts show 1M, 3M, 6M, 1Y, and 2Y?',
+              body:
+                  'Those ranges let you inspect shorter daily price patterns quickly while still keeping longer trend views available from the same chart screen.',
+            ),
+            const LegalSection(
+              heading:
+                  'What is the difference between current price and closing price?',
+              body:
+                  'During market hours in West Africa Time, charts show opening price and current price. After the market closes, the current field becomes the closing price for that trading day.',
+            ),
+            const LegalSection(
+              heading: 'Why do push alerts mention stocks I do not hold?',
+              body:
+                  'Market-wide alerts are intended to surface notable movers across the exchange so users can return to the app and inspect opportunities outside their current portfolio.',
+            ),
+            LegalSection(
+              heading:
+                  'Where can I read the privacy policy or request account deletion?',
+              body:
+                  'Use the in-app legal screens or open the public pages directly from the policy and deletion sections.',
+            ),
+          ],
+          footerLinks: [
+            LegalLinkItem(
+              label: 'Privacy policy',
+              url: widget.api.privacyPolicyUrl,
+            ),
+            LegalLinkItem(
+              label: 'Account deletion',
+              url: widget.api.accountDeletionUrl,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -3542,6 +4178,8 @@ class _DashboardShellState extends State<DashboardShell> {
             themeMode: widget.themeMode,
             onThemeSelected: widget.onThemeModeChanged,
             onOpenProfile: () => setState(() => index = 4),
+            onOpenAbout: _showAboutScreen,
+            onOpenFaq: _showFaqScreen,
             onSignOut: widget.onSignOut,
           ),
           appBar: AppBar(
@@ -3686,10 +4324,9 @@ class VersionLabel extends StatelessWidget {
         future: packageInfoFuture,
         builder: (context, snapshot) {
           final info = snapshot.data;
-          final packageVersion =
-              info == null || info.version.isEmpty || info.buildNumber.isEmpty
+          final packageVersion = info == null || info.version.isEmpty
               ? null
-              : '${info.version}.${info.buildNumber}';
+              : info.version;
           final version = packageVersion ?? appDisplayVersion;
           final text = '$platformLabel $version';
           if (compact) {
@@ -3744,6 +4381,8 @@ class DashboardSideDrawer extends StatelessWidget {
     required this.themeMode,
     required this.onThemeSelected,
     required this.onOpenProfile,
+    required this.onOpenAbout,
+    required this.onOpenFaq,
     required this.onSignOut,
   });
 
@@ -3752,6 +4391,8 @@ class DashboardSideDrawer extends StatelessWidget {
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeSelected;
   final VoidCallback onOpenProfile;
+  final VoidCallback onOpenAbout;
+  final VoidCallback onOpenFaq;
   final Future<void> Function() onSignOut;
 
   @override
@@ -3855,11 +4496,37 @@ class DashboardSideDrawer extends StatelessWidget {
                     const Divider(height: 1),
                     ListTile(
                       leading: const Icon(Icons.info_outline),
+                      title: const Text('About'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {
+                        Navigator.of(context).maybePop();
+                        onOpenAbout();
+                      },
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(Icons.quiz_outlined),
+                      title: const Text('FAQ'),
+                      trailing: const Icon(Icons.chevron_right),
+                      onTap: () {
+                        Navigator.of(context).maybePop();
+                        onOpenFaq();
+                      },
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(Icons.info_outline),
                       title: const Text('App version'),
-                      trailing: VersionLabel(
-                        packageInfoFuture: packageInfoFuture,
-                        centered: false,
-                        compact: true,
+                      subtitle: Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: VersionLabel(
+                            packageInfoFuture: packageInfoFuture,
+                            centered: false,
+                            compact: true,
+                          ),
+                        ),
                       ),
                     ),
                     const Divider(height: 1),
@@ -3964,11 +4631,13 @@ class _HomeScreenState extends State<HomeScreen> {
   late Future<List<Holding>> holdingsFuture = widget.api.holdings();
   late Future<MarketLeaders> leadersFuture = widget.api.marketLeaders();
   late Future<MarketIdeasBundle> ideasFuture = widget.api.marketIdeas();
+  late Future<List<MarketNewsItem>> newsFuture = widget.api.marketNews();
   Timer? refreshTimer;
 
   @override
   void initState() {
     super.initState();
+    marketDataRefreshSignal.addListener(_handleMarketDataRefresh);
     refreshTimer = Timer.periodic(const Duration(minutes: 15), (_) {
       if (mounted) refresh();
     });
@@ -3976,8 +4645,13 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    marketDataRefreshSignal.removeListener(_handleMarketDataRefresh);
     refreshTimer?.cancel();
     super.dispose();
+  }
+
+  void _handleMarketDataRefresh() {
+    if (mounted) refresh();
   }
 
   void refresh() {
@@ -3985,6 +4659,7 @@ class _HomeScreenState extends State<HomeScreen> {
       holdingsFuture = widget.api.holdings();
       leadersFuture = widget.api.marketLeaders();
       ideasFuture = widget.api.marketIdeas();
+      newsFuture = widget.api.marketNews();
     });
   }
 
@@ -4151,10 +4826,58 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     );
                   }
+                  if (ideasSnapshot.hasError) {
+                    return MarketIdeasPanel(
+                      bundle: MarketIdeasBundle(
+                        disclaimer: _marketIdeasFallbackDisclaimer,
+                        generatedAt: DateTime.now(),
+                        ideas: const [],
+                        stocksAnalyzed: 0,
+                      ),
+                      emptyMessage:
+                          'Potential buy setups are temporarily unavailable. Pull to refresh after the next market sync.',
+                    );
+                  }
                   if (ideas == null || ideas.ideas.isEmpty) {
-                    return const SizedBox.shrink();
+                    return MarketIdeasPanel(
+                      bundle:
+                          ideas ??
+                          MarketIdeasBundle(
+                            disclaimer: _marketIdeasFallbackDisclaimer,
+                            generatedAt: DateTime.now(),
+                            ideas: const [],
+                            stocksAnalyzed: 0,
+                          ),
+                      emptyMessage:
+                          'No setups are standing out right now, but this panel stays here and refreshes with the next sync.',
+                    );
                   }
                   return MarketIdeasPanel(bundle: ideas);
+                },
+              ),
+              const SizedBox(height: 16),
+              FutureBuilder<List<MarketNewsItem>>(
+                future: newsFuture,
+                builder: (context, newsSnapshot) {
+                  final news = newsSnapshot.data ?? const <MarketNewsItem>[];
+                  if (news.isEmpty &&
+                      newsSnapshot.connectionState == ConnectionState.waiting) {
+                    return const Card(
+                      child: Padding(
+                        padding: EdgeInsets.all(16),
+                        child: LinearProgressIndicator(),
+                      ),
+                    );
+                  }
+                  if (news.isEmpty) {
+                    return const SizedBox.shrink();
+                  }
+                  return MarketNewsPanel(
+                    title: 'Market news',
+                    subtitle:
+                        'Live headlines from NGX Pulse so the web and app surfaces stay in step.',
+                    news: news,
+                  );
                 },
               ),
             ],
@@ -4426,8 +5149,16 @@ class _AccountScreenState extends State<AccountScreen> {
                   'You can delete your account inside the app. That removes the account and associated portfolio records, except where data must be retained for security, fraud prevention, or legal compliance.',
             ),
           ],
-          footerText:
-              'Public policy URL: ${widget.api.privacyPolicyUrl}\nAccount deletion page: ${widget.api.accountDeletionUrl}',
+          footerLinks: [
+            LegalLinkItem(
+              label: 'Open privacy policy',
+              url: widget.api.privacyPolicyUrl,
+            ),
+            LegalLinkItem(
+              label: 'Open account deletion page',
+              url: widget.api.accountDeletionUrl,
+            ),
+          ],
         ),
       ),
     );
@@ -4450,7 +5181,16 @@ class _AccountScreenState extends State<AccountScreen> {
                   'If you cannot access the app, use the public account deletion page to submit a deletion request with your account email address.',
             ),
           ],
-          footerText: 'Public deletion URL: ${widget.api.accountDeletionUrl}',
+          footerLinks: [
+            LegalLinkItem(
+              label: 'Open account deletion page',
+              url: widget.api.accountDeletionUrl,
+            ),
+            LegalLinkItem(
+              label: 'Open privacy policy',
+              url: widget.api.privacyPolicyUrl,
+            ),
+          ],
         ),
       ),
     );
@@ -4473,32 +5213,6 @@ class _AccountScreenState extends State<AccountScreen> {
       if (mounted) showError(context, error.toString());
     } finally {
       if (mounted) setState(() => deletingAccount = false);
-    }
-  }
-
-  Future<void> backfillHistory() async {
-    setState(() => backfillingHistory = true);
-    try {
-      final message = await widget.api.syncStocks(includeHistory: true);
-      refresh();
-      if (mounted) showMessage(context, message);
-    } catch (error) {
-      if (mounted) showError(context, error.toString());
-    } finally {
-      if (mounted) setState(() => backfillingHistory = false);
-    }
-  }
-
-  Future<void> sendTestPush() async {
-    setState(() => sendingTestPush = true);
-    try {
-      final message = await widget.api.sendTestPush();
-      refresh();
-      if (mounted) showMessage(context, message);
-    } catch (error) {
-      if (mounted) showError(context, error.toString());
-    } finally {
-      if (mounted) setState(() => sendingTestPush = false);
     }
   }
 
@@ -4843,11 +5557,13 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
   late Future<List<Holding>> future = widget.api.holdings();
   Holding? selectedHolding;
   Future<StockDetailBundle>? selectedDetailFuture;
+  StockHistoryRange selectedDetailRange = StockHistoryRange.oneYear;
   Timer? refreshTimer;
 
   @override
   void initState() {
     super.initState();
+    marketDataRefreshSignal.addListener(_handleMarketDataRefresh);
     refreshTimer = Timer.periodic(const Duration(minutes: 15), (_) {
       if (mounted) refresh();
     });
@@ -4855,15 +5571,23 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
 
   @override
   void dispose() {
+    marketDataRefreshSignal.removeListener(_handleMarketDataRefresh);
     refreshTimer?.cancel();
     super.dispose();
+  }
+
+  void _handleMarketDataRefresh() {
+    if (mounted) refresh();
   }
 
   void refresh() {
     setState(() {
       future = widget.api.holdings();
       if (selectedHolding != null) {
-        selectedDetailFuture = widget.api.stockDetail(selectedHolding!.symbol);
+        selectedDetailFuture = widget.api.stockDetail(
+          selectedHolding!.symbol,
+          range: selectedDetailRange.queryValue,
+        );
       }
     });
   }
@@ -4871,7 +5595,23 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
   void selectHolding(Holding holding) {
     setState(() {
       selectedHolding = holding;
-      selectedDetailFuture = widget.api.stockDetail(holding.symbol);
+      selectedDetailFuture = widget.api.stockDetail(
+        holding.symbol,
+        range: selectedDetailRange.queryValue,
+      );
+    });
+  }
+
+  void selectDetailRange(StockHistoryRange range) {
+    if (range == selectedDetailRange) return;
+    setState(() {
+      selectedDetailRange = range;
+      if (selectedHolding != null) {
+        selectedDetailFuture = widget.api.stockDetail(
+          selectedHolding!.symbol,
+          range: selectedDetailRange.queryValue,
+        );
+      }
     });
   }
 
@@ -5001,6 +5741,8 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
                     final detail = PortfolioHoldingDetail(
                       holding: selected,
                       detailFuture: selectedDetailFuture,
+                      selectedRange: selectedDetailRange,
+                      onRangeSelected: selectDetailRange,
                     );
                     final holdingCards = holdings
                         .map(
@@ -5173,7 +5915,15 @@ class HoldingTile extends StatelessWidget {
                           value: holding.quantity.toStringAsFixed(2),
                         ),
                         StockDetailValue(
-                          label: 'Value',
+                          label: 'Purchase price',
+                          value: moneyFormat.format(holding.avgPurchasePrice),
+                        ),
+                        StockDetailValue(
+                          label: 'Invested',
+                          value: moneyFormat.format(holding.totalCost),
+                        ),
+                        StockDetailValue(
+                          label: 'Current value',
                           value: moneyFormat.format(holding.totalValue),
                         ),
                         StockDetailValue(
@@ -5190,44 +5940,107 @@ class HoldingTile extends StatelessWidget {
             );
           }
 
-          return ListTile(
+          final desktopValueWidth = constraints.maxWidth >= 1500
+              ? 340.0
+              : constraints.maxWidth >= 1250
+              ? 300.0
+              : 260.0;
+
+          return InkWell(
             onTap: onTap,
-            leading: CompanyLogo(symbol: holding.symbol),
-            title: Text(holding.symbol),
-            subtitle: Text(
-              '${holding.name ?? holding.symbol} - ${holding.quantity.toStringAsFixed(2)} shares',
-            ),
-            trailing: Wrap(
-              spacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(moneyFormat.format(holding.totalValue)),
-                    Text(
-                      '${holding.profitLossPercent?.toStringAsFixed(2) ?? '0.00'}%',
-                      style: TextStyle(
-                        color: holding.profitLoss >= 0
-                            ? Colors.green.shade700
-                            : Colors.red.shade700,
-                        fontWeight: FontWeight.w700,
-                      ),
+            borderRadius: BorderRadius.circular(24),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+              child: Row(
+                children: [
+                  CompanyLogo(symbol: holding.symbol, size: 46),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          holding.symbol,
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${holding.name ?? holding.symbol} - ${holding.quantity.toStringAsFixed(2)} shares',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-                IconButton(
-                  tooltip: 'Edit',
-                  onPressed: onEdit,
-                  icon: const Icon(Icons.edit_outlined),
-                ),
-                IconButton(
-                  tooltip: 'Delete',
-                  onPressed: onDelete,
-                  icon: const Icon(Icons.delete_outline),
-                ),
-              ],
+                  ),
+                  const SizedBox(width: 14),
+                  SizedBox(
+                    width: desktopValueWidth,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          moneyFormat.format(holding.totalValue),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Invested ${moneyFormat.format(holding.totalCost)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right,
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                        Text(
+                          'Buy ${moneyFormat.format(holding.avgPurchasePrice)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right,
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(
+                                color: Theme.of(
+                                  context,
+                                ).colorScheme.onSurfaceVariant,
+                              ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${holding.profitLossPercent?.toStringAsFixed(2) ?? '0.00'}%',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.titleSmall
+                              ?.copyWith(
+                                color: holding.profitLoss >= 0
+                                    ? Colors.green.shade700
+                                    : Colors.red.shade700,
+                                fontWeight: FontWeight.w700,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  IconButton(
+                    tooltip: 'Edit',
+                    onPressed: onEdit,
+                    icon: const Icon(Icons.edit_outlined),
+                  ),
+                  IconButton(
+                    tooltip: 'Delete',
+                    onPressed: onDelete,
+                    icon: const Icon(Icons.delete_outline),
+                  ),
+                ],
+              ),
             ),
           );
         },
@@ -5286,10 +6099,14 @@ class PortfolioHoldingDetail extends StatelessWidget {
     super.key,
     required this.holding,
     required this.detailFuture,
+    required this.selectedRange,
+    required this.onRangeSelected,
   });
 
   final Holding? holding;
   final Future<StockDetailBundle>? detailFuture;
+  final StockHistoryRange selectedRange;
+  final ValueChanged<StockHistoryRange> onRangeSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -5317,6 +6134,8 @@ class PortfolioHoldingDetail extends StatelessWidget {
             final latest = points.isEmpty ? null : points.last;
             final marketSnapshot = detail?.marketSnapshot;
             final news = detail?.news ?? [];
+            final dividends = detail?.dividends ?? [];
+            final disclosures = detail?.disclosures ?? [];
             final loading = snapshot.connectionState == ConnectionState.waiting;
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -5345,20 +6164,62 @@ class PortfolioHoldingDetail extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 16),
-                SizedBox(
-                  height: 240,
-                  child: points.isEmpty
-                      ? const EmptyState(
-                          icon: Icons.show_chart,
-                          text: 'No chart data available yet.',
-                        )
-                      : PriceChart(points: points),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: StockHistoryRange.values
+                      .map(
+                        (range) => ChoiceChip(
+                          label: Text(range.label),
+                          selected: selectedRange == range,
+                          onSelected: (_) => onRangeSelected(range),
+                        ),
+                      )
+                      .toList(),
+                ),
+                const SizedBox(height: 12),
+                points.isEmpty
+                    ? const EmptyState(
+                        icon: Icons.show_chart,
+                        text: 'No chart data available yet.',
+                      )
+                    : PriceChart(
+                        points: points,
+                        symbolLabel: holding!.symbol,
+                        rangeLabel: selectedRange.label,
+                        showSummaryMetrics: false,
+                      ),
+                const SizedBox(height: 8),
+                Text(
+                  detail?.historySource == 'ngxpulse_history'
+                      ? 'Powered by NGX Pulse historical daily prices and cached inside Stockfolio.'
+                      : 'Chart history is loaded from the available market data feed for this stock.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
                 const SizedBox(height: 16),
                 Wrap(
                   spacing: 10,
                   runSpacing: 10,
                   children: [
+                    StockDetailValue(
+                      label: 'Amount invested',
+                      value: moneyFormat.format(holding!.totalCost),
+                    ),
+                    StockDetailValue(
+                      label: 'Purchase price',
+                      value: moneyFormat.format(holding!.avgPurchasePrice),
+                    ),
+                    StockDetailValue(
+                      label: 'Current value',
+                      value: moneyFormat.format(holding!.totalValue),
+                    ),
+                    StockDetailValue(
+                      label: 'Unrealized P/L',
+                      value: moneyFormat.format(holding!.profitLoss),
+                      positive: holding!.profitLoss >= 0,
+                    ),
                     StockDetailValue(
                       label: 'Current',
                       value: stock?.lastPrice == null
@@ -5417,6 +6278,34 @@ class PortfolioHoldingDetail extends StatelessWidget {
                 ),
                 const SizedBox(height: 18),
                 Text(
+                  'Dividend history',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 8),
+                if (dividends.isEmpty)
+                  Text(
+                    loading
+                        ? 'Loading dividend history...'
+                        : 'No recent dividend history available.',
+                  )
+                else
+                  ...dividends.map((item) => DividendTile(item: item)),
+                const SizedBox(height: 18),
+                Text(
+                  'Recent disclosures',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 8),
+                if (disclosures.isEmpty)
+                  Text(
+                    loading
+                        ? 'Loading disclosures...'
+                        : 'No recent disclosures available.',
+                  )
+                else
+                  ...disclosures.map((item) => DisclosureTile(item: item)),
+                const SizedBox(height: 18),
+                Text(
                   'Company updates',
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
@@ -5448,35 +6337,302 @@ class CompanyNewsTile extends StatelessWidget {
     final modified = item.modified == null
         ? null
         : DateFormat.yMMMd().format(item.modified!);
+    final metadata = [
+      item.submissionType?.trim(),
+      modified,
+    ].whereType<String>().where((value) => value.isNotEmpty).join(' - ');
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Icon(Icons.description_outlined, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  item.title ?? 'Untitled update',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(
-                    context,
-                  ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+      child: InkWell(
+        onTap: item.url == null
+            ? null
+            : () => openExternalUrl(context, item.url!),
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Icon(Icons.description_outlined, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      item.title ?? 'Untitled update',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        decoration: item.url == null
+                            ? TextDecoration.none
+                            : TextDecoration.underline,
+                      ),
+                    ),
+                    if (metadata.isNotEmpty)
+                      Text(
+                        metadata,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                  ],
                 ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class DividendTile extends StatelessWidget {
+  const DividendTile({super.key, required this.item});
+
+  final DividendRecord item;
+
+  @override
+  Widget build(BuildContext context) {
+    final exDate = item.exDividendDate == null
+        ? 'TBA'
+        : DateFormat.yMMMd().format(item.exDividendDate!);
+    final recordDate = item.recordDate == null
+        ? 'TBA'
+        : DateFormat.yMMMd().format(item.recordDate!);
+    final payDate = item.payDate == null
+        ? 'TBA'
+        : DateFormat.yMMMd().format(item.payDate!);
+    final amount = item.dividendPerShare == null
+        ? 'Not available'
+        : '${item.currency ?? 'NGN'} ${item.dividendPerShare!.toStringAsFixed(2)}';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+        ),
+        child: Wrap(
+          spacing: 12,
+          runSpacing: 8,
+          children: [
+            _MetaPill(icon: Icons.payments_outlined, text: amount),
+            _MetaPill(
+              icon: Icons.event_available_outlined,
+              text: 'Ex-date $exDate',
+            ),
+            _MetaPill(
+              icon: Icons.fact_check_outlined,
+              text: 'Record date $recordDate',
+            ),
+            _MetaPill(
+              icon: Icons.calendar_month_outlined,
+              text: 'Pay date $payDate',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class DisclosureTile extends StatelessWidget {
+  const DisclosureTile({super.key, required this.item});
+
+  final DisclosureItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final published = item.publishedAt == null
+        ? null
+        : DateFormat.yMMMd().format(item.publishedAt!);
+    final subtitle = [
+      item.category,
+      published,
+    ].whereType<String>().where((value) => value.isNotEmpty).join(' - ');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: InkWell(
+        onTap: item.url == null
+            ? null
+            : () => openExternalUrl(context, item.url!),
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: Theme.of(context).colorScheme.outlineVariant,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                item.title ?? 'Untitled disclosure',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  decoration: item.url == null
+                      ? TextDecoration.none
+                      : TextDecoration.underline,
+                ),
+              ),
+              if (subtitle.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(subtitle, style: Theme.of(context).textTheme.bodySmall),
+              ],
+              if ((item.summary ?? '').trim().isNotEmpty) ...[
+                const SizedBox(height: 6),
                 Text(
-                  [item.submissionType?.trim(), modified]
-                      .whereType<String>()
-                      .where((value) => value.isNotEmpty)
-                      .join(' - '),
+                  item.summary!,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class MarketNewsPanel extends StatelessWidget {
+  const MarketNewsPanel({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.news,
+  });
+
+  final String title;
+  final String subtitle;
+  final List<MarketNewsItem> news;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              subtitle,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 14),
+            ...news.map((item) => MarketNewsTile(item: item)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class MarketNewsTile extends StatelessWidget {
+  const MarketNewsTile({super.key, required this.item});
+
+  final MarketNewsItem item;
+
+  @override
+  Widget build(BuildContext context) {
+    final published = item.publishedAt == null
+        ? null
+        : DateFormat.yMMMd().add_jm().format(item.publishedAt!.toLocal());
+    final sourceLine = [
+      item.source,
+      published,
+    ].whereType<String>().where((value) => value.isNotEmpty).join(' - ');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: InkWell(
+        onTap: item.url == null
+            ? null
+            : () => openExternalUrl(context, item.url!),
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: Theme.of(context).colorScheme.outlineVariant,
             ),
           ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                item.title ?? 'Untitled market story',
+                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  decoration: item.url == null
+                      ? TextDecoration.none
+                      : TextDecoration.underline,
+                ),
+              ),
+              if (sourceLine.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(sourceLine, style: Theme.of(context).textTheme.bodySmall),
+              ],
+              if ((item.summary ?? '').trim().isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  item.summary!,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MetaPill extends StatelessWidget {
+  const _MetaPill({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Theme.of(
+          context,
+        ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: Theme.of(context).colorScheme.primary),
+          const SizedBox(width: 6),
+          Text(text, style: Theme.of(context).textTheme.labelMedium),
         ],
       ),
     );
@@ -5498,6 +6654,7 @@ class _StocksScreenState extends State<StocksScreen> {
   late Future<MarketStatus> marketStatusFuture = widget.api.marketStatus();
   Stock? selectedStock;
   Future<StockDetailBundle>? selectedDetailFuture;
+  StockHistoryRange selectedDetailRange = StockHistoryRange.oneYear;
   Timer? refreshTimer;
   Timer? searchDebounce;
   String? searchHint;
@@ -5505,6 +6662,7 @@ class _StocksScreenState extends State<StocksScreen> {
   @override
   void initState() {
     super.initState();
+    marketDataRefreshSignal.addListener(_handleMarketDataRefresh);
     refreshTimer = Timer.periodic(const Duration(minutes: 15), (_) {
       if (mounted) refresh();
     });
@@ -5512,10 +6670,15 @@ class _StocksScreenState extends State<StocksScreen> {
 
   @override
   void dispose() {
+    marketDataRefreshSignal.removeListener(_handleMarketDataRefresh);
     refreshTimer?.cancel();
     searchDebounce?.cancel();
     search.dispose();
     super.dispose();
+  }
+
+  void _handleMarketDataRefresh() {
+    if (mounted) refresh();
   }
 
   void refresh() {
@@ -5523,7 +6686,10 @@ class _StocksScreenState extends State<StocksScreen> {
       future = widget.api.stocks(search: search.text.trim());
       marketStatusFuture = widget.api.marketStatus();
       if (selectedStock != null) {
-        selectedDetailFuture = widget.api.stockDetail(selectedStock!.symbol);
+        selectedDetailFuture = widget.api.stockDetail(
+          selectedStock!.symbol,
+          range: selectedDetailRange.queryValue,
+        );
       }
     });
   }
@@ -5531,7 +6697,23 @@ class _StocksScreenState extends State<StocksScreen> {
   void selectStock(Stock stock) {
     setState(() {
       selectedStock = stock;
-      selectedDetailFuture = widget.api.stockDetail(stock.symbol);
+      selectedDetailFuture = widget.api.stockDetail(
+        stock.symbol,
+        range: selectedDetailRange.queryValue,
+      );
+    });
+  }
+
+  void selectDetailRange(StockHistoryRange range) {
+    if (range == selectedDetailRange) return;
+    setState(() {
+      selectedDetailRange = range;
+      if (selectedStock != null) {
+        selectedDetailFuture = widget.api.stockDetail(
+          selectedStock!.symbol,
+          range: selectedDetailRange.queryValue,
+        );
+      }
     });
   }
 
@@ -5643,6 +6825,8 @@ class _StocksScreenState extends State<StocksScreen> {
                       PortfolioHoldingDetail(
                         holding: Holding.fromStock(selectedStock!),
                         detailFuture: selectedDetailFuture,
+                        selectedRange: selectedDetailRange,
+                        onRangeSelected: selectDetailRange,
                       ),
                       const SizedBox(height: 12),
                     ],
@@ -5675,49 +6859,88 @@ class ChartsScreen extends StatefulWidget {
 }
 
 class _ChartsScreenState extends State<ChartsScreen> {
-  static const List<int> rangeOptionsMonths = [3, 6, 12, 24];
+  static const List<StockHistoryRange> rangeOptions = StockHistoryRange.values;
 
   late Future<List<Stock>> stocksFuture = widget.api.stocks();
   Future<List<PricePoint>>? historyFuture;
+  Future<List<DividendRecord>>? dividendsFuture;
   String? selectedSymbol;
-  int selectedRangeMonths = 12;
+  StockHistoryRange selectedRange = StockHistoryRange.oneMonth;
+
+  @override
+  void initState() {
+    super.initState();
+    marketDataRefreshSignal.addListener(_handleMarketDataRefresh);
+  }
+
+  @override
+  void dispose() {
+    marketDataRefreshSignal.removeListener(_handleMarketDataRefresh);
+    super.dispose();
+  }
+
+  void _handleMarketDataRefresh() {
+    if (!mounted) return;
+    setState(() {
+      stocksFuture = widget.api.stocks();
+      if (selectedSymbol != null) {
+        _loadSelectedStockData(selectedSymbol!);
+      }
+    });
+  }
+
+  void _loadSelectedStockData(String symbol) {
+    historyFuture = widget.api.history(symbol, range: selectedRange.queryValue);
+    dividendsFuture = widget.api.dividends(symbol, limit: 10);
+  }
 
   void selectStock(String? symbol) {
     setState(() {
       selectedSymbol = symbol;
-      historyFuture = symbol == null
-          ? null
-          : widget.api.history(symbol, months: selectedRangeMonths);
+      historyFuture = null;
+      dividendsFuture = null;
+      if (symbol != null) {
+        _loadSelectedStockData(symbol);
+      }
     });
   }
 
-  void selectRange(int months) {
-    if (months == selectedRangeMonths) return;
+  void selectRange(StockHistoryRange range) {
+    if (range == selectedRange) return;
     setState(() {
-      selectedRangeMonths = months;
+      selectedRange = range;
       historyFuture = selectedSymbol == null
           ? null
-          : widget.api.history(selectedSymbol!, months: selectedRangeMonths);
+          : widget.api.history(
+              selectedSymbol!,
+              range: selectedRange.queryValue,
+            );
     });
   }
 
-  String rangeLabel(int months) {
-    switch (months) {
-      case 3:
-        return '3M';
-      case 6:
-        return '6M';
-      case 12:
-        return '1Y';
-      case 24:
-        return '2Y';
-      default:
-        return '${months}M';
+  String rangeDescription(StockHistoryRange range) {
+    switch (range) {
+      case StockHistoryRange.oneDay:
+        return 'Single latest trading session';
+      case StockHistoryRange.fiveDays:
+        return 'Last five trading sessions';
+      case StockHistoryRange.oneWeek:
+        return 'Past calendar week';
+      case StockHistoryRange.oneMonth:
+        return 'Past month';
+      case StockHistoryRange.threeMonths:
+        return 'Past three months';
+      case StockHistoryRange.sixMonths:
+        return 'Past six months';
+      case StockHistoryRange.oneYear:
+        return 'Past twelve months';
+      case StockHistoryRange.all:
+        return 'Full available price history';
     }
   }
 
   String get _historySelectionKey =>
-      '${selectedSymbol ?? 'none'}-$selectedRangeMonths';
+      '${selectedSymbol ?? 'none'}-${selectedRange.queryValue}';
 
   @override
   Widget build(BuildContext context) {
@@ -5733,96 +6956,168 @@ class _ChartsScreenState extends State<ChartsScreen> {
         if (stocks.isEmpty) {
           return const EmptyState(
             icon: Icons.show_chart,
-            text: 'No chart-enabled stocks loaded yet.',
+            text: 'No NGX Pulse chart-enabled stocks loaded yet.',
           );
         }
         if (selectedSymbol == null ||
             !stocks.any((stock) => stock.symbol == selectedSymbol)) {
           selectedSymbol = stocks.first.symbol;
-          historyFuture = widget.api.history(
-            selectedSymbol!,
-            months: selectedRangeMonths,
-          );
+          _loadSelectedStockData(selectedSymbol!);
         }
         return ListView(
           padding: const EdgeInsets.all(16),
           children: [
             DropdownButtonFormField<String>(
+              isExpanded: true,
               initialValue: selectedSymbol,
               decoration: const InputDecoration(
                 prefixIcon: Icon(Icons.business),
                 labelText: 'Stock',
               ),
+              selectedItemBuilder: (context) => stocks
+                  .map(
+                    (stock) => Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        stockPickerLabel(stock),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  )
+                  .toList(),
               items: stocks
                   .map(
                     (stock) => DropdownMenuItem(
                       value: stock.symbol,
-                      child: Text(stockPickerLabel(stock)),
+                      child: Text(
+                        stockPickerLabel(stock),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                   )
                   .toList(),
               onChanged: selectStock,
             ),
             const SizedBox(height: 16),
+            Text(
+              selectedSymbol == null
+                  ? 'Daily chart'
+                  : '$selectedSymbol daily chart',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Switch between quick trade windows and longer-term trend views using NGX Pulse price history. Candles show daily direction, and the touch crosshair exposes exact price levels.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 12),
             Wrap(
               spacing: 8,
               runSpacing: 8,
-              children: rangeOptionsMonths
+              children: rangeOptions
                   .map(
-                    (months) => ChoiceChip(
-                      label: Text(rangeLabel(months)),
-                      selected: selectedRangeMonths == months,
-                      onSelected: (_) => selectRange(months),
+                    (range) => ChoiceChip(
+                      label: Text(range.label),
+                      selected: selectedRange == range,
+                      onSelected: (_) => selectRange(range),
                     ),
                   )
                   .toList(),
             ),
             const SizedBox(height: 8),
             Text(
-              'NGX public history currently backfills about 1 year. The 2Y view will deepen automatically as daily snapshots continue to accumulate in your database.',
+              '${rangeDescription(selectedRange)}. Dividend history below the chart stays tied to the selected stock so you can review price action beside payout dates.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),
             const SizedBox(height: 16),
-            SizedBox(
-              height: 360,
-              child: Card(
-                key: ValueKey(_historySelectionKey),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: historyFuture == null
-                      ? const EmptyState(
-                          icon: Icons.show_chart,
-                          text: 'Select a stock to view price history.',
-                        )
-                      : FutureBuilder<List<PricePoint>>(
-                          future: historyFuture,
-                          builder: (context, historySnapshot) {
-                            if (historySnapshot.connectionState ==
-                                ConnectionState.waiting) {
-                              return const Center(
+            Card(
+              key: ValueKey(_historySelectionKey),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: historyFuture == null
+                    ? const EmptyState(
+                        icon: Icons.show_chart,
+                        text: 'Select a stock to view price history.',
+                      )
+                    : FutureBuilder<List<PricePoint>>(
+                        future: historyFuture,
+                        builder: (context, historySnapshot) {
+                          if (historySnapshot.connectionState ==
+                              ConnectionState.waiting) {
+                            return const Center(
+                              child: Padding(
+                                padding: EdgeInsets.all(40),
                                 child: CircularProgressIndicator(),
-                              );
-                            }
-                            final points = historySnapshot.data ?? [];
-                            if (points.isEmpty) {
-                              return EmptyState(
-                                icon: Icons.show_chart,
-                                text:
-                                    'No history available for the selected ${rangeLabel(selectedRangeMonths)} range yet.',
-                              );
-                            }
-                            return PriceChart(
-                              key: ValueKey(
-                                '$_historySelectionKey-${points.length}-${points.first.date.toIso8601String()}-${points.last.date.toIso8601String()}',
                               ),
-                              points: points,
-                              rangeLabel: rangeLabel(selectedRangeMonths),
                             );
-                          },
-                        ),
-                ),
+                          }
+                          final points = historySnapshot.data ?? [];
+                          if (points.isEmpty) {
+                            return EmptyState(
+                              icon: Icons.show_chart,
+                              text:
+                                  'No history available for the selected ${selectedRange.label} range yet.',
+                            );
+                          }
+                          return PriceChart(
+                            points: points,
+                            symbolLabel: selectedSymbol,
+                            rangeLabel: selectedRange.label,
+                          );
+                        },
+                      ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Dividend history',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: dividendsFuture == null
+                    ? const EmptyState(
+                        icon: Icons.payments_outlined,
+                        text: 'Select a stock to view recent dividend history.',
+                      )
+                    : FutureBuilder<List<DividendRecord>>(
+                        future: dividendsFuture,
+                        builder: (context, dividendSnapshot) {
+                          if (dividendSnapshot.connectionState ==
+                              ConnectionState.waiting) {
+                            return const Center(
+                              child: Padding(
+                                padding: EdgeInsets.all(24),
+                                child: CircularProgressIndicator(),
+                              ),
+                            );
+                          }
+                          final dividends = dividendSnapshot.data ?? [];
+                          if (dividends.isEmpty) {
+                            return const Text(
+                              'No recent dividend history available for the selected stock.',
+                            );
+                          }
+                          return Column(
+                            children: [
+                              for (final item in dividends)
+                                DividendTile(item: item),
+                            ],
+                          );
+                        },
+                      ),
               ),
             ),
           ],
@@ -5871,6 +7166,7 @@ class _AdminScreenState extends State<AdminScreen> {
     try {
       final message = await widget.api.syncStocks(includeHistory: false);
       refresh();
+      notifyMarketDataRefreshed();
       if (mounted) showMessage(context, message);
     } catch (error) {
       if (mounted) showError(context, error.toString());
@@ -5884,6 +7180,7 @@ class _AdminScreenState extends State<AdminScreen> {
     try {
       final message = await widget.api.syncStocks(includeHistory: true);
       refresh();
+      notifyMarketDataRefreshed();
       if (mounted) showMessage(context, message);
     } catch (error) {
       if (mounted) showError(context, error.toString());
@@ -5924,7 +7221,7 @@ class _AdminScreenState extends State<AdminScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.sync),
-                label: const Text('Sync NGX stocks'),
+                label: const Text('Sync market data'),
               ),
               OutlinedButton.icon(
                 onPressed: backfillingHistory ? null : backfillHistory,
@@ -5934,7 +7231,7 @@ class _AdminScreenState extends State<AdminScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.history),
-                label: const Text('Backfill 1Y history'),
+                label: const Text('Refresh cached history'),
               ),
             ],
           ),
@@ -5977,7 +7274,7 @@ class _AdminScreenState extends State<AdminScreen> {
                       const SizedBox(height: 8),
                       Text('Stocks in database: ${status.stocksCount}'),
                       if (status.source != null)
-                        Text('Source: ${status.source}'),
+                        Text('Source: ${syncSourceLabel(status.source)}'),
                       if (status.lastSuccessAt != null)
                         Text(
                           'Last success: ${DateFormat.yMd().add_jm().format(status.lastSuccessAt!.toLocal())}',
@@ -6224,7 +7521,7 @@ class MarketStatusBanner extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Market status: ${status.status}',
+                  'Market status: ${friendlyMarketStatusLabel(status.status)}',
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w700,
                     color: palette.content,
@@ -6307,6 +7604,7 @@ class _HoldingDialogState extends State<HoldingDialog> {
             ? null
             : double.tryParse(currentPrice.text),
         notes: notes.text.trim().isEmpty ? null : notes.text.trim(),
+        mergeWithExisting: widget.initial == null,
       ),
     );
   }
@@ -6411,17 +7709,26 @@ class LegalSection {
   final String body;
 }
 
+class LegalLinkItem {
+  const LegalLinkItem({required this.label, required this.url});
+
+  final String label;
+  final String url;
+}
+
 class LegalDocumentScreen extends StatelessWidget {
   const LegalDocumentScreen({
     super.key,
     required this.title,
     required this.sections,
     this.footerText,
+    this.footerLinks = const [],
   });
 
   final String title;
   final List<LegalSection> sections;
   final String? footerText;
+  final List<LegalLinkItem> footerLinks;
 
   @override
   Widget build(BuildContext context) {
@@ -6447,6 +7754,22 @@ class LegalDocumentScreen extends StatelessWidget {
                   ],
                   if (footerText != null && footerText!.isNotEmpty)
                     SelectableText(footerText!),
+                  if (footerLinks.isNotEmpty) ...[
+                    if (footerText != null && footerText!.isNotEmpty)
+                      const SizedBox(height: 16),
+                    for (final link in footerLinks)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton.icon(
+                            onPressed: () => openExternalUrl(context, link.url),
+                            icon: const Icon(Icons.open_in_new),
+                            label: Text(link.label),
+                          ),
+                        ),
+                      ),
+                  ],
                 ],
               ),
             ),
@@ -7521,9 +8844,10 @@ class _LeaderTickerChip extends StatelessWidget {
 }
 
 class MarketIdeasPanel extends StatelessWidget {
-  const MarketIdeasPanel({super.key, required this.bundle});
+  const MarketIdeasPanel({super.key, required this.bundle, this.emptyMessage});
 
   final MarketIdeasBundle bundle;
+  final String? emptyMessage;
 
   @override
   Widget build(BuildContext context) {
@@ -7571,70 +8895,131 @@ class MarketIdeasPanel extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 14),
-            ...bundle.ideas.map(
-              (idea) => Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest.withValues(
-                      alpha: 0.28,
-                    ),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: theme.colorScheme.outlineVariant),
+            if (bundle.ideas.isEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      theme.colorScheme.primaryContainer.withValues(alpha: 0.9),
+                      theme.colorScheme.secondaryContainer.withValues(
+                        alpha: 0.72,
+                      ),
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  idea.stock.symbol,
-                                  style: theme.textTheme.titleSmall?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                                if ((idea.stock.name ?? '').isNotEmpty)
-                                  Text(
-                                    idea.stock.name!,
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      color: theme.colorScheme.onSurfaceVariant,
-                                    ),
-                                  ),
-                              ],
-                            ),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                  ),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.auto_graph_rounded,
+                      color: theme.colorScheme.primary,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        emptyMessage ??
+                            'Potential buy setups will appear here as soon as the synced market data surfaces a strong candidate.',
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              )
+            else
+              ...bundle.ideas.map(
+                (idea) => Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          theme.colorScheme.surfaceContainerHighest.withValues(
+                            alpha: 0.92,
                           ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.primaryContainer,
-                              borderRadius: BorderRadius.circular(999),
-                            ),
-                            child: Text(
-                              'Score ${idea.score.toStringAsFixed(1)}',
-                              style: theme.textTheme.labelMedium?.copyWith(
-                                color: theme.colorScheme.onPrimaryContainer,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
+                          theme.colorScheme.primaryContainer.withValues(
+                            alpha: 0.2,
                           ),
                         ],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
                       ),
-                      const SizedBox(height: 10),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: idea.rationale
-                            .map(
-                              (reason) => Container(
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: theme.colorScheme.outlineVariant,
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                minWidth: 180,
+                                maxWidth: 360,
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    idea.stock.symbol,
+                                    style: theme.textTheme.titleSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  if ((idea.stock.name ?? '').isNotEmpty)
+                                    Text(
+                                      idea.stock.name!,
+                                      style: theme.textTheme.bodySmall
+                                          ?.copyWith(
+                                            color: theme
+                                                .colorScheme
+                                                .onSurfaceVariant,
+                                          ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: [
+                                    theme.colorScheme.primaryContainer,
+                                    theme.colorScheme.secondaryContainer,
+                                  ],
+                                ),
+                                borderRadius: BorderRadius.circular(999),
+                              ),
+                              child: Text(
+                                'Score ${idea.score.toStringAsFixed(1)}',
+                                style: theme.textTheme.labelMedium?.copyWith(
+                                  color: theme.colorScheme.onPrimaryContainer,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            if (idea.priceToEarningsRatio != null &&
+                                idea.priceToEarningsRatio!.isFinite &&
+                                idea.priceToEarningsRatio! > 0)
+                              Container(
                                 padding: const EdgeInsets.symmetric(
                                   horizontal: 10,
                                   vertical: 6,
@@ -7647,43 +9032,74 @@ class MarketIdeasPanel extends StatelessWidget {
                                   ),
                                 ),
                                 child: Text(
-                                  reason,
-                                  style: theme.textTheme.labelMedium,
+                                  'P/E ${idea.priceToEarningsRatio!.toStringAsFixed(1)}',
+                                  style: theme.textTheme.labelMedium?.copyWith(
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
-                            )
-                            .toList(),
-                      ),
-                      if (idea.webSummary != null &&
-                          idea.webSummary!.isNotEmpty) ...[
+                          ],
+                        ),
                         const SizedBox(height: 10),
-                        Text(
-                          'Latest company update',
-                          style: theme.textTheme.labelLarge?.copyWith(
-                            fontWeight: FontWeight.w700,
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: idea.rationale
+                              .map(
+                                (reason) => Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: theme.colorScheme.surface.withValues(
+                                      alpha: 0.96,
+                                    ),
+                                    borderRadius: BorderRadius.circular(999),
+                                    border: Border.all(
+                                      color: theme.colorScheme.secondary
+                                          .withValues(alpha: 0.22),
+                                    ),
+                                  ),
+                                  child: Text(
+                                    reason,
+                                    style: theme.textTheme.labelMedium,
+                                    softWrap: true,
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        ),
+                        if (idea.webSummary != null &&
+                            idea.webSummary!.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          Text(
+                            'Latest company update',
+                            style: theme.textTheme.labelLarge?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          idea.webSummary!,
-                          style: theme.textTheme.bodyMedium,
-                        ),
-                      ],
-                      if (idea.fundamentalNote != null &&
-                          idea.fundamentalNote!.isNotEmpty) ...[
-                        const SizedBox(height: 10),
-                        Text(
-                          idea.fundamentalNote!,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
+                          const SizedBox(height: 4),
+                          Text(
+                            idea.webSummary!,
+                            style: theme.textTheme.bodyMedium,
                           ),
-                        ),
+                        ],
+                        if (idea.fundamentalNote != null &&
+                            idea.fundamentalNote!.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          Text(
+                            idea.fundamentalNote!,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -7851,160 +9267,820 @@ class StockTile extends StatelessWidget {
   }
 }
 
-class PriceChart extends StatelessWidget {
-  const PriceChart({super.key, required this.points, this.rangeLabel});
+enum PriceChartType {
+  line('Line'),
+  bar('Bar');
+
+  const PriceChartType(this.label);
+
+  final String label;
+}
+
+PriceChartType _preferredChartType = PriceChartType.line;
+
+PriceChartType parsePriceChartType(String? value) {
+  for (final type in PriceChartType.values) {
+    if (type.name == value) return type;
+  }
+  return PriceChartType.line;
+}
+
+List<PricePoint> chartDisplayPoints(
+  List<PricePoint> points,
+  PriceChartType type,
+  String? rangeLabel,
+) {
+  if (type != PriceChartType.bar || points.length <= 24) return points;
+  final normalizedRange = rangeLabel?.toUpperCase();
+  switch (normalizedRange) {
+    case '3M':
+      return _aggregatePricePointsByTradingWindow(points, bucketSize: 5);
+    case '6M':
+    case '1Y':
+      return _aggregatePricePointsByCalendar(points, _monthBucketKey);
+    case 'ALL':
+      final monthSpan =
+          ((points.last.date.year - points.first.date.year) * 12) +
+          (points.last.date.month - points.first.date.month) +
+          1;
+      if (monthSpan > 24) {
+        return _aggregatePricePointsByCalendar(points, _quarterBucketKey);
+      }
+      return _aggregatePricePointsByCalendar(points, _monthBucketKey);
+    default:
+      return points;
+  }
+}
+
+List<PricePoint> _aggregatePricePointsByTradingWindow(
+  List<PricePoint> points, {
+  required int bucketSize,
+}) {
+  if (points.length <= bucketSize) return points;
+  final aggregated = <PricePoint>[];
+  for (var start = 0; start < points.length; start += bucketSize) {
+    final end = min(start + bucketSize, points.length);
+    aggregated.add(_mergePricePointBucket(points.sublist(start, end)));
+  }
+  return aggregated;
+}
+
+List<PricePoint> _aggregatePricePointsByCalendar(
+  List<PricePoint> points,
+  String Function(DateTime) bucketKeyForDate,
+) {
+  final buckets = <String, List<PricePoint>>{};
+  for (final point in points) {
+    buckets
+        .putIfAbsent(bucketKeyForDate(point.date), () => <PricePoint>[])
+        .add(point);
+  }
+  return buckets.values.map(_mergePricePointBucket).toList();
+}
+
+PricePoint _mergePricePointBucket(List<PricePoint> bucket) {
+  final first = bucket.first;
+  final last = bucket.last;
+  return PricePoint(
+    date: last.date,
+    open: first.open,
+    high: bucket.map((item) => item.high).reduce(max),
+    low: bucket.map((item) => item.low).reduce(min),
+    close: last.close,
+    volume: bucket.fold<double>(0, (sum, item) => sum + (item.volume ?? 0)),
+  );
+}
+
+String _monthBucketKey(DateTime date) =>
+    '${date.year}-${date.month.toString().padLeft(2, '0')}';
+
+String _quarterBucketKey(DateTime date) {
+  final quarter = ((date.month - 1) ~/ 3) + 1;
+  return '${date.year}-Q$quarter';
+}
+
+/// First day of each calendar month from [first] through [last] (inclusive).
+List<DateTime> _monthStartsInDataSpan(DateTime first, DateTime last) {
+  final months = <DateTime>[];
+  var y = first.year;
+  var m = first.month;
+  final endKey = last.year * 12 + last.month;
+  while (true) {
+    final key = y * 12 + m;
+    if (key > endKey) {
+      break;
+    }
+    months.add(DateTime(y, m));
+    m++;
+    if (m > 12) {
+      m = 1;
+      y++;
+    }
+    if (months.length > 48) {
+      break;
+    }
+  }
+  return months;
+}
+
+int _firstIndexOnOrAfterMonthStart(
+  List<PricePoint> points,
+  DateTime monthStart,
+) {
+  for (var i = 0; i < points.length; i++) {
+    final d = points[i].date;
+    if (!d.isBefore(monthStart)) {
+      return i;
+    }
+  }
+  return points.length - 1;
+}
+
+Set<int> _calendarChartBottomLabelIndices(
+  List<PricePoint> points,
+  String rangeLabel,
+  int maxTicks,
+) {
+  if (points.isEmpty) {
+    return const <int>{};
+  }
+  if (points.length < 2) {
+    return {0};
+  }
+  final first = points.first.date;
+  final last = points.last.date;
+  var monthStarts = _monthStartsInDataSpan(first, last);
+  final maxMonths = rangeLabel == '6M' ? 6 : 12;
+  if (monthStarts.length > maxMonths) {
+    monthStarts = monthStarts.sublist(monthStarts.length - maxMonths);
+  }
+  if (monthStarts.length > maxTicks) {
+    final step = max(1, ((monthStarts.length - 1) / (maxTicks - 1)).ceil());
+    final picked = <DateTime>[monthStarts.first];
+    for (var i = step; i < monthStarts.length - 1; i += step) {
+      picked.add(monthStarts[i]);
+    }
+    if (picked.last != monthStarts.last) {
+      picked.add(monthStarts.last);
+    }
+    monthStarts = picked;
+  }
+  final fmt = (rangeLabel == '1Y' || first.year != last.year)
+      ? DateFormat('MMM yy')
+      : DateFormat.MMM();
+  final indices = <int>{};
+  final seen = <String>{};
+  for (final ms in monthStarts) {
+    final idx = _firstIndexOnOrAfterMonthStart(points, ms);
+    final label = fmt.format(ms);
+    if (seen.contains(label)) {
+      continue;
+    }
+    seen.add(label);
+    indices.add(idx);
+  }
+  return indices;
+}
+
+Set<int> chartBottomLabelIndices(
+  List<PricePoint> points,
+  PriceChartType type,
+  String? rangeLabel,
+  double chartWidth,
+) {
+  if (points.isEmpty) {
+    return const <int>{};
+  }
+  final maxTicks = chartWidth < 380
+      ? 3
+      : chartWidth < 560
+      ? 4
+      : chartWidth < 840
+      ? 5
+      : 6;
+  if (points.length <= maxTicks) {
+    return {for (var i = 0; i < points.length; i++) i};
+  }
+  if (rangeLabel == '6M' || rangeLabel == '1Y') {
+    return _calendarChartBottomLabelIndices(points, rangeLabel!, maxTicks);
+  }
+  final result = <int>{};
+  for (var tick = 0; tick < maxTicks; tick++) {
+    final ratio = maxTicks == 1 ? 0.0 : tick / (maxTicks - 1);
+    result.add((ratio * (points.length - 1)).round());
+  }
+  result.add(0);
+  result.add(points.length - 1);
+  return result;
+}
+
+class PriceChart extends StatefulWidget {
+  const PriceChart({
+    super.key,
+    required this.points,
+    this.rangeLabel,
+    this.symbolLabel,
+    this.showSummaryMetrics = true,
+  });
 
   final List<PricePoint> points;
   final String? rangeLabel;
+  final String? symbolLabel;
+  final bool showSummaryMetrics;
+
+  @override
+  State<PriceChart> createState() => _PriceChartState();
+}
+
+class _PriceChartState extends State<PriceChart> {
+  late PriceChartType selectedType = PriceChartType.line;
+
+  @override
+  void initState() {
+    super.initState();
+    selectedType = _preferredChartType;
+    _restorePreferredChartType();
+  }
+
+  Future<void> _restorePreferredChartType() async {
+    final prefs = await SharedPreferences.getInstance();
+    final restored = parsePriceChartType(
+      prefs.getString(_chartTypePreferenceKey),
+    );
+    _preferredChartType = restored;
+    if (!mounted || restored == selectedType) return;
+    setState(() => selectedType = restored);
+  }
+
+  Future<void> _setSelectedType(PriceChartType type) async {
+    if (type == selectedType) return;
+    setState(() => selectedType = type);
+    _preferredChartType = type;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_chartTypePreferenceKey, type.name);
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final values = [
-      ...points.map((point) => point.open),
-      ...points.map((point) => point.close),
-    ];
-    final minPrice = values.reduce(min);
-    final maxPrice = values.reduce(max);
-    final yPadding = max(1.0, (maxPrice - minPrice) * 0.12);
-    final primary = Theme.of(context).colorScheme.primary;
-    final secondary = Theme.of(context).colorScheme.tertiary;
-    final latest = points.last;
-    final earliest = points.first;
-    final showYearOnAxis =
-        rangeLabel == '1Y' ||
-        rangeLabel == '2Y' ||
-        latest.date.year != earliest.date.year;
-    final dateRangeLabel =
-        '${DateFormat.MMMd().format(earliest.date)} - ${DateFormat.MMMd().format(latest.date)}';
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final chartWidth = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : MediaQuery.sizeOf(context).width;
+        final displayPoints = chartDisplayPoints(
+          widget.points,
+          selectedType,
+          widget.rangeLabel,
+        );
+        final bottomLabelIndices = chartBottomLabelIndices(
+          displayPoints,
+          selectedType,
+          widget.rangeLabel,
+          chartWidth,
+        );
+        final values = [
+          ...displayPoints.map((point) => point.open),
+          ...displayPoints.map((point) => point.high),
+          ...displayPoints.map((point) => point.low),
+          ...displayPoints.map((point) => point.close),
+        ];
+        final axisScale = chartAxisScaleForPrices(values);
+        final bullishColor = _gainColor;
+        final bearishColor = _lossColor;
+        final latest = displayPoints.last;
+        final earliest = displayPoints.first;
+        final highestHigh = displayPoints
+            .map((point) => point.high)
+            .reduce(max);
+        final lowestLow = displayPoints.map((point) => point.low).reduce(min);
+        final totalVolume = displayPoints.fold<double>(
+          0,
+          (sum, point) => sum + (point.volume ?? 0),
+        );
+        final absoluteChange = latest.close - earliest.open;
+        final percentChange = earliest.open > 0
+            ? (absoluteChange / earliest.open) * 100
+            : 0.0;
+        final changeColor = absoluteChange >= 0 ? bullishColor : bearishColor;
+        final showYearOnAxis =
+            widget.rangeLabel == '1Y' ||
+            widget.rangeLabel == 'ALL' ||
+            latest.date.year != earliest.date.year;
+        final watNow = currentWatTime();
+        final latestWatDate = latest.date.toUtc().add(const Duration(hours: 1));
+        final useCurrentPriceLabel =
+            isMarketHoursWat(watNow) && isSameWatDate(latestWatDate, watNow);
+        final rangeFmt = earliest.date.year == latest.date.year
+            ? DateFormat.MMMd()
+            : DateFormat.yMMMd();
+        final dateRangeLabel =
+            '${rangeFmt.format(earliest.date)} - ${rangeFmt.format(latest.date)}';
+        final verticalInterval = max(
+          1,
+          (displayPoints.length / (selectedType == PriceChartType.bar ? 6 : 4))
+              .ceil(),
+        ).toDouble();
+        final closeSpots = [
+          for (var i = 0; i < displayPoints.length; i++)
+            FlSpot(i.toDouble(), displayPoints[i].close),
+        ];
+        final compactChart = !widget.showSummaryMetrics;
+        final chartHeight = compactChart ? 250.0 : 320.0;
+        final axisLabelStyle = theme.textTheme.labelSmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.82),
+          fontSize: chartWidth < 420 ? 10 : null,
+          fontWeight: FontWeight.w600,
+        );
+        final useMonthlyBarLabels =
+            selectedType == PriceChartType.bar &&
+            displayPoints.length != widget.points.length;
+        final useCalendarMonthAxis =
+            (widget.rangeLabel == '6M' || widget.rangeLabel == '1Y') &&
+            selectedType != PriceChartType.bar;
+        final barWidth = chartWidth < 420
+            ? 10.0
+            : displayPoints.length > 60
+            ? 8.0
+            : displayPoints.length > 24
+            ? 12.0
+            : 18.0;
+        final chartSurface = theme.brightness == Brightness.dark
+            ? const Color(0xFF0B1115)
+            : const Color(0xFFFFFFFF);
+        final chartSurfaceAlt = theme.brightness == Brightness.dark
+            ? const Color(0xFF101A20)
+            : const Color(0xFFF7FAF9);
+        final chartBorder = theme.brightness == Brightness.dark
+            ? Colors.white.withValues(alpha: 0.08)
+            : const Color(0xFFDCE7E4);
+        final currentPriceText = moneyFormat.format(latest.close);
+        final changePrefix = absoluteChange >= 0 ? '+' : '';
+        final moveText =
+            '$changePrefix${moneyFormat.format(absoluteChange)} ($changePrefix${percentChange.toStringAsFixed(2)}%)';
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Wrap(
-          spacing: 10,
-          runSpacing: 6,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            if (rangeLabel != null)
-              Text(
-                '$rangeLabel view',
-                style: theme.textTheme.labelLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
+        String chartDateLabel(DateTime value) {
+          if (useMonthlyBarLabels) {
+            if (widget.rangeLabel == '3M') {
+              return DateFormat('d MMM').format(value);
+            }
+            return DateFormat('MMM yy').format(value);
+          }
+          if (useCalendarMonthAxis) {
+            final spanStart = displayPoints.first.date;
+            final spanEnd = displayPoints.last.date;
+            final crossesYear = spanStart.year != spanEnd.year;
+            if (widget.rangeLabel == '1Y' || crossesYear) {
+              return DateFormat('MMM yy').format(value);
+            }
+            return DateFormat.MMM().format(value);
+          }
+          return showYearOnAxis
+              ? DateFormat('MMM yy').format(value)
+              : DateFormat.MMM().format(value);
+        }
+
+        String tooltipDateLabel(DateTime value) {
+          if (useMonthlyBarLabels) {
+            return DateFormat.yMMM().format(value);
+          }
+          return DateFormat.yMMMd().format(value);
+        }
+
+        return Container(
+          decoration: BoxDecoration(
+            color: chartSurface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: chartBorder),
+            boxShadow: [
+              if (theme.brightness == Brightness.light)
+                BoxShadow(
+                  color: const Color(0xFF0F172A).withValues(alpha: 0.06),
+                  blurRadius: 22,
+                  offset: const Offset(0, 10),
                 ),
-              ),
-            Text(
-              dateRangeLabel,
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Wrap(
-          alignment: WrapAlignment.end,
-          spacing: 14,
-          runSpacing: 8,
-          children: [
-            ChartLegendDot(
-              color: secondary,
-              label: 'Opening price: ${moneyFormat.format(latest.open)}',
-            ),
-            ChartLegendDot(
-              color: primary,
-              label: 'Closing price: ${moneyFormat.format(latest.close)}',
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Expanded(
-          child: LineChart(
-            LineChartData(
-              minY: minPrice - yPadding,
-              maxY: maxPrice + yPadding,
-              gridData: FlGridData(
-                show: true,
-                drawVerticalLine: false,
-                getDrawingHorizontalLine: (_) =>
-                    FlLine(color: chartGridColor(theme), strokeWidth: 1),
-              ),
-              borderData: FlBorderData(show: false),
-              titlesData: FlTitlesData(
-                topTitles: const AxisTitles(
-                  sideTitles: SideTitles(showTitles: false),
-                ),
-                rightTitles: const AxisTitles(
-                  sideTitles: SideTitles(showTitles: false),
-                ),
-                leftTitles: AxisTitles(
-                  sideTitles: SideTitles(
-                    showTitles: true,
-                    reservedSize: 56,
-                    getTitlesWidget: (value, meta) => Text(
-                      compactFormat.format(value),
-                      style: theme.textTheme.labelSmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
+            ],
+          ),
+          padding: EdgeInsets.all(chartWidth < 420 ? 12 : 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            if (widget.symbolLabel != null &&
+                                widget.symbolLabel!.trim().isNotEmpty)
+                              Text(
+                                widget.symbolLabel!,
+                                style: theme.textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 0,
+                                ),
+                              ),
+                            if (widget.rangeLabel != null)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 9,
+                                  vertical: 5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.primaryContainer
+                                      .withValues(alpha: 0.36),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: theme.colorScheme.primary.withValues(
+                                      alpha: 0.14,
+                                    ),
+                                  ),
+                                ),
+                                child: Text(
+                                  widget.rangeLabel!,
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.primary,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                            Text(
+                              dateRangeLabel,
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          currentPriceText,
+                          style: theme.textTheme.headlineSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          moveText,
+                          style: theme.textTheme.labelLarge?.copyWith(
+                            color: changeColor,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  SegmentedButton<PriceChartType>(
+                    showSelectedIcon: false,
+                    segments: PriceChartType.values
+                        .map(
+                          (type) => ButtonSegment<PriceChartType>(
+                            value: type,
+                            label: Text(type.label),
+                          ),
+                        )
+                        .toList(),
+                    selected: {selectedType},
+                    onSelectionChanged: (selection) =>
+                        _setSelectedType(selection.first),
+                    style: ButtonStyle(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: WidgetStatePropertyAll(
+                        theme.textTheme.labelMedium?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
                       ),
                     ),
                   ),
-                ),
-                bottomTitles: AxisTitles(
-                  sideTitles: SideTitles(
-                    showTitles: true,
-                    reservedSize: 32,
-                    interval: max(1, points.length / 4).toDouble(),
-                    getTitlesWidget: (value, meta) {
-                      final index = value.round();
-                      if (index < 0 || index >= points.length) {
-                        return const SizedBox.shrink();
-                      }
-                      final point = points[index];
-                      return Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Text(
-                          showYearOnAxis
-                              ? DateFormat('MMM yy').format(point.date)
-                              : DateFormat.MMM().format(point.date),
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ),
+                ],
               ),
-              lineBarsData: [
-                LineChartBarData(
-                  spots: [
-                    for (var i = 0; i < points.length; i++)
-                      FlSpot(i.toDouble(), points[i].open),
+              if (widget.showSummaryMetrics) ...[
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 10,
+                  children: [
+                    ChartMetricChip(
+                      label: 'Open',
+                      value: moneyFormat.format(latest.open),
+                      color: theme.colorScheme.tertiary,
+                    ),
+                    ChartMetricChip(
+                      label: 'High',
+                      value: moneyFormat.format(highestHigh),
+                      color: bullishColor,
+                    ),
+                    ChartMetricChip(
+                      label: 'Low',
+                      value: moneyFormat.format(lowestLow),
+                      color: bearishColor,
+                    ),
+                    ChartMetricChip(
+                      label: useCurrentPriceLabel ? 'Current' : 'Close',
+                      value: moneyFormat.format(latest.close),
+                      color: changeColor,
+                    ),
+                    ChartMetricChip(
+                      label: 'Move',
+                      value:
+                          '${absoluteChange >= 0 ? '+' : ''}${moneyFormat.format(absoluteChange)} (${percentChange >= 0 ? '+' : ''}${percentChange.toStringAsFixed(2)}%)',
+                      color: changeColor,
+                    ),
+                    ChartMetricChip(
+                      label: 'Volume',
+                      value: compactFormat.format(totalVolume),
+                      color: theme.colorScheme.secondary,
+                    ),
                   ],
-                  isCurved: true,
-                  barWidth: 2,
-                  color: secondary,
-                  dotData: const FlDotData(show: false),
-                ),
-                LineChartBarData(
-                  spots: [
-                    for (var i = 0; i < points.length; i++)
-                      FlSpot(i.toDouble(), points[i].close),
-                  ],
-                  isCurved: true,
-                  barWidth: 3,
-                  color: primary,
-                  dotData: const FlDotData(show: false),
-                  belowBarData: BarAreaData(
-                    show: true,
-                    color: primary.withValues(alpha: 0.12),
-                  ),
                 ),
               ],
+              const SizedBox(height: 14),
+              Container(
+                height: chartHeight,
+                padding: const EdgeInsets.fromLTRB(4, 14, 4, 4),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [chartSurfaceAlt, chartSurface],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: chartBorder.withValues(alpha: 0.7)),
+                ),
+                child: switch (selectedType) {
+                  PriceChartType.line => LineChart(
+                    LineChartData(
+                      minX: 0,
+                      maxX: max(1, displayPoints.length - 1).toDouble(),
+                      minY: axisScale.minY,
+                      maxY: axisScale.maxY,
+                      borderData: FlBorderData(show: false),
+                      gridData: FlGridData(
+                        show: true,
+                        drawVerticalLine: false,
+                        verticalInterval: verticalInterval,
+                        getDrawingHorizontalLine: (_) => FlLine(
+                          color: chartGridColor(theme),
+                          strokeWidth: 1,
+                        ),
+                        getDrawingVerticalLine: (_) => FlLine(
+                          color: chartGridColor(theme),
+                          strokeWidth: 1,
+                        ),
+                      ),
+                      extraLinesData: ExtraLinesData(
+                        horizontalLines: [
+                          HorizontalLine(
+                            y: latest.close,
+                            color: changeColor.withValues(alpha: 0.36),
+                            strokeWidth: 1,
+                            dashArray: [6, 6],
+                          ),
+                        ],
+                      ),
+                      lineTouchData: LineTouchData(
+                        handleBuiltInTouches: true,
+                        touchTooltipData: LineTouchTooltipData(
+                          fitInsideHorizontally: true,
+                          fitInsideVertically: true,
+                          getTooltipColor: (_) => chartSurface,
+                          getTooltipItems: (spots) => spots
+                              .map(
+                                (spot) => LineTooltipItem(
+                                  '${tooltipDateLabel(displayPoints[spot.x.toInt()].date)}\n${moneyFormat.format(spot.y)}',
+                                  theme.textTheme.labelMedium!.copyWith(
+                                    color: theme.colorScheme.onSurface,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        ),
+                      ),
+                      titlesData: FlTitlesData(
+                        topTitles: const AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        leftTitles: const AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 58,
+                            interval: axisScale.interval,
+                            getTitlesWidget: (value, meta) => Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: Text(
+                                chartAxisLabel(value),
+                                style: axisLabelStyle,
+                              ),
+                            ),
+                          ),
+                        ),
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 34,
+                            interval: 1,
+                            getTitlesWidget: (value, meta) {
+                              final index = value.round();
+                              if (index < 0 ||
+                                  index >= displayPoints.length ||
+                                  !bottomLabelIndices.contains(index)) {
+                                return const SizedBox.shrink();
+                              }
+                              final point = displayPoints[index];
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text(
+                                  chartDateLabel(point.date),
+                                  style: axisLabelStyle,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                      lineBarsData: [
+                        LineChartBarData(
+                          spots: closeSpots,
+                          color: changeColor,
+                          isCurved: true,
+                          barWidth: 3.4,
+                          belowBarData: BarAreaData(
+                            show: true,
+                            gradient: LinearGradient(
+                              colors: [
+                                changeColor.withValues(alpha: 0.24),
+                                changeColor.withValues(alpha: 0.02),
+                              ],
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                            ),
+                          ),
+                          dotData: const FlDotData(show: false),
+                        ),
+                      ],
+                    ),
+                  ),
+                  PriceChartType.bar => BarChart(
+                    BarChartData(
+                      minY: axisScale.minY,
+                      maxY: axisScale.maxY,
+                      alignment: BarChartAlignment.spaceBetween,
+                      gridData: FlGridData(
+                        show: true,
+                        drawVerticalLine: false,
+                        getDrawingHorizontalLine: (_) => FlLine(
+                          color: chartGridColor(theme),
+                          strokeWidth: 1,
+                        ),
+                      ),
+                      borderData: FlBorderData(show: false),
+                      barTouchData: BarTouchData(
+                        enabled: true,
+                        touchTooltipData: BarTouchTooltipData(
+                          fitInsideHorizontally: true,
+                          fitInsideVertically: true,
+                          getTooltipColor: (_) => chartSurface,
+                          getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                            final point = displayPoints[group.x.toInt()];
+                            return BarTooltipItem(
+                              '${tooltipDateLabel(point.date)}\n${moneyFormat.format(rod.toY)}',
+                              theme.textTheme.labelMedium!.copyWith(
+                                color: theme.colorScheme.onSurface,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      titlesData: FlTitlesData(
+                        topTitles: const AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        leftTitles: const AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 58,
+                            interval: axisScale.interval,
+                            getTitlesWidget: (value, meta) => Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: Text(
+                                chartAxisLabel(value),
+                                style: axisLabelStyle,
+                              ),
+                            ),
+                          ),
+                        ),
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 34,
+                            interval: 1,
+                            getTitlesWidget: (value, meta) {
+                              final index = value.round();
+                              if (index < 0 ||
+                                  index >= displayPoints.length ||
+                                  !bottomLabelIndices.contains(index)) {
+                                return const SizedBox.shrink();
+                              }
+                              final point = displayPoints[index];
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text(
+                                  chartDateLabel(point.date),
+                                  style: axisLabelStyle,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                      barGroups: [
+                        for (var i = 0; i < displayPoints.length; i++)
+                          BarChartGroupData(
+                            x: i,
+                            barRods: [
+                              BarChartRodData(
+                                toY: displayPoints[i].close,
+                                width: barWidth,
+                                color:
+                                    displayPoints[i].close >=
+                                        displayPoints[i].open
+                                    ? bullishColor
+                                    : bearishColor,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                            ],
+                          ),
+                      ],
+                    ),
+                  ),
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class ChartMetricChip extends StatelessWidget {
+  const ChartMetricChip({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: 0.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w700,
             ),
           ),
-        ),
-      ],
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: Theme.of(context).colorScheme.onSurface,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -8018,15 +10094,17 @@ class ChartLegendDot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
-      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
         Container(
-          width: 10,
-          height: 10,
+          width: 12,
+          height: 12,
           decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
-        const SizedBox(width: 6),
-        Text(label),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(label, style: Theme.of(context).textTheme.bodyMedium),
+        ),
       ],
     );
   }
