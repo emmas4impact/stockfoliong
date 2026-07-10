@@ -24,21 +24,13 @@ const _themeModePreferenceKey = 'theme_mode';
 const _webSessionDeadlineKey = 'web_session_deadline_ms';
 const _webSessionExtendedKey = 'web_session_extended';
 const _financialPrivacyPreferenceKey = 'financial_privacy_hidden';
-const _chartTypePreferenceKey = 'preferred_chart_type';
-const _marketIdeasFallbackDisclaimer =
-    'Stockfolio NG highlights data-driven watchlist ideas only. It is not a financial adviser app. Contact your broker for detailed analysis.';
-const _seedColor = Color(0xFF109E7A);
-const _gainColor = Color(0xFF00C16E);
-const _lossColor = Color(0xFFFF617D);
-const _darkScaffold = Color(0xFF101619);
-const _darkSurface = Color(0xFF162126);
-const _darkSurfaceAlt = Color(0xFF1A2B31);
-const _lightScaffold = Color(0xFFF4F6F9);
-final ValueNotifier<int> marketDataRefreshSignal = ValueNotifier<int>(0);
-
-void notifyMarketDataRefreshed() {
-  marketDataRefreshSignal.value = marketDataRefreshSignal.value + 1;
-}
+const _seedColor = Color(0xFF00A86B);
+const _gainColor = Color(0xFF00B67A);
+const _lossColor = Color(0xFFFF5A7A);
+const _darkScaffold = Color(0xFF0B1215);
+const _darkSurface = Color(0xFF101A1E);
+const _darkSurfaceAlt = Color(0xFF142126);
+const _lightScaffold = Color(0xFFEDF2F7);
 
 String stockLogoUrl(String symbol) =>
     '$apiBaseUrl/public/stocks/${Uri.encodeComponent(symbol)}/logo';
@@ -46,7 +38,7 @@ String stockLogoUrl(String symbol) =>
 String stockLogoAssetPath(String symbol) =>
     'assets/company_logos/${symbol.trim().toUpperCase()}.png';
 
-const _appBrandAsset = 'assets/app_icon/stockfoliong_app_icon.png';
+const _appBrandAsset = 'assets/app_icon/stockfolio_app_icon.png';
 
 IconData trendDirectionIcon(bool positive) =>
     positive ? Icons.trending_up_rounded : Icons.trending_down_rounded;
