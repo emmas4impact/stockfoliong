@@ -33,6 +33,7 @@ def upsert_stock(db: Session, stock_data: dict) -> Stock:
     for field, value in stock_data.items():
         if hasattr(stock, field) and value is not None:
             setattr(stock, field, value)
+    db.flush()
     return stock
 
 
@@ -362,6 +363,16 @@ def upsert_stock_history(
     since: date | None = None,
     allow_legacy_fallback: bool = True,
 ) -> int:
+    symbol = symbol.strip().upper()
+    if db.get(Stock, symbol) is None:
+        record_sync_log(
+            db,
+            status="warning",
+            source="stock_history_sync",
+            message=f"Skipped history for {symbol}: stock master row is missing.",
+        )
+        return 0
+
     source = "ngxpulse_history" if get_settings().ngxpulse_enabled else "ngx_chart"
     try:
         rows = fetch_historical_prices_cached(
@@ -401,6 +412,15 @@ def upsert_stock_history(
 
 def upsert_daily_stock_snapshot(db: Session, stock: Stock) -> int:
     if stock.last_price is None:
+        return 0
+    db.flush()
+    if db.get(Stock, stock.symbol) is None:
+        record_sync_log(
+            db,
+            status="warning",
+            source="daily_stock_snapshot",
+            message=f"Skipped daily snapshot for {stock.symbol}: stock master row is missing.",
+        )
         return 0
 
     snapshot_close = float(stock.last_price)

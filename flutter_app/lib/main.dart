@@ -259,9 +259,9 @@ ChartAxisScale chartAxisScaleForPrices(
 
   final lowest = positiveValues.reduce(min);
   final highest = positiveValues.reduce(max);
-  final spread = max(highest - lowest, max(highest * 0.03, 0.5));
-  final paddedMin = max(0, lowest - (spread * 0.16));
-  final paddedMax = highest + (spread * 0.16);
+  final spread = max(highest - lowest, max(highest * 0.025, 0.5));
+  final paddedMin = max(0, lowest - (spread * 0.18));
+  final paddedMax = highest + (spread * 0.18);
   final roughInterval = max(0.1, (paddedMax - paddedMin) / targetTicks);
   final exponent = pow(10, (log(roughInterval) / ln10).floor()).toDouble();
   final normalized = roughInterval / exponent;
@@ -273,15 +273,12 @@ ChartAxisScale chartAxisScaleForPrices(
       ? 5.0
       : 10.0;
   final interval = niceBase * exponent;
-  final snappedMin = (paddedMin / interval).floorToDouble() * interval;
   final snappedMax = (paddedMax / interval).ceilToDouble() * interval;
+  final maxY = interval >= 1 ? snappedMax.ceilToDouble() : snappedMax;
+  final candidateMin = maxY - (interval * targetTicks);
   final minY = interval >= 1
-      ? max(0.0, snappedMin.floorToDouble())
-      : max(0.0, snappedMin);
-  final maxY = max(
-    minY + (interval * targetTicks),
-    interval >= 1 ? snappedMax.ceilToDouble() : snappedMax,
-  );
+      ? max(0.0, candidateMin.floorToDouble())
+      : max(0.0, candidateMin);
   return ChartAxisScale(minY: minY, maxY: maxY, interval: interval);
 }
 
@@ -9462,59 +9459,26 @@ Set<int> chartBottomLabelIndices(
   if (points.isEmpty) {
     return const <int>{};
   }
-  final widthTicks = chartWidth < 380
+  final maxTicks = chartWidth < 380
+      ? 3
+      : chartWidth < 560
       ? 4
-      : chartWidth < 520
+      : chartWidth < 840
       ? 5
-      : chartWidth < 760
-      ? 6
-      : 8;
-  if (type == PriceChartType.bar) {
-    final maxTicks = rangeLabel == 'ALL'
-        ? min(widthTicks, 8)
-        : min(widthTicks, 6);
-    if (points.length <= maxTicks) {
-      return {for (var i = 0; i < points.length; i++) i};
-    }
-    final step = max(1, ((points.length - 1) / (maxTicks - 1)).ceil());
-    final result = <int>{0};
-    for (var i = step; i < points.length - 1; i += step) {
-      result.add(i);
-    }
-    result.add(points.length - 1);
-    return result;
-  }
-  final useCalendarAxis =
-      (rangeLabel == '6M' || rangeLabel == '1Y') && type != PriceChartType.bar;
-  if (useCalendarAxis) {
-    return _calendarChartBottomLabelIndices(points, rangeLabel!, widthTicks);
-  }
-  if (type != PriceChartType.bar && points.length <= 12) {
+      : 6;
+  if (points.length <= maxTicks) {
     return {for (var i = 0; i < points.length; i++) i};
   }
-
-  final monthChangeIndices = <int>[0];
-  for (var i = 1; i < points.length; i++) {
-    final previous = points[i - 1].date;
-    final current = points[i].date;
-    if (previous.month != current.month || previous.year != current.year) {
-      monthChangeIndices.add(i);
-    }
+  if (rangeLabel == '6M' || rangeLabel == '1Y') {
+    return _calendarChartBottomLabelIndices(points, rangeLabel!, maxTicks);
   }
-  if (monthChangeIndices.last != points.length - 1) {
-    monthChangeIndices.add(points.length - 1);
-  }
-
-  final targetCount = min(widthTicks, type == PriceChartType.bar ? 6 : 5);
-  if (monthChangeIndices.length <= targetCount) {
-    return monthChangeIndices.toSet();
-  }
-  final step = (monthChangeIndices.length / targetCount).ceil();
   final result = <int>{};
-  for (var i = 0; i < monthChangeIndices.length; i += step) {
-    result.add(monthChangeIndices[i]);
+  for (var tick = 0; tick < maxTicks; tick++) {
+    final ratio = maxTicks == 1 ? 0.0 : tick / (maxTicks - 1);
+    result.add((ratio * (points.length - 1)).round());
   }
-  result.add(monthChangeIndices.last);
+  result.add(0);
+  result.add(points.length - 1);
   return result;
 }
 
@@ -9630,10 +9594,11 @@ class _PriceChartState extends State<PriceChart> {
             FlSpot(i.toDouble(), displayPoints[i].close),
         ];
         final compactChart = !widget.showSummaryMetrics;
-        final chartHeight = compactChart ? 230.0 : 290.0;
+        final chartHeight = compactChart ? 250.0 : 320.0;
         final axisLabelStyle = theme.textTheme.labelSmall?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
+          color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.82),
           fontSize: chartWidth < 420 ? 10 : null,
+          fontWeight: FontWeight.w600,
         );
         final useMonthlyBarLabels =
             selectedType == PriceChartType.bar &&
@@ -9648,6 +9613,19 @@ class _PriceChartState extends State<PriceChart> {
             : displayPoints.length > 24
             ? 12.0
             : 18.0;
+        final chartSurface = theme.brightness == Brightness.dark
+            ? const Color(0xFF0B1115)
+            : const Color(0xFFFFFFFF);
+        final chartSurfaceAlt = theme.brightness == Brightness.dark
+            ? const Color(0xFF101A20)
+            : const Color(0xFFF7FAF9);
+        final chartBorder = theme.brightness == Brightness.dark
+            ? Colors.white.withValues(alpha: 0.08)
+            : const Color(0xFFDCE7E4);
+        final currentPriceText = moneyFormat.format(latest.close);
+        final changePrefix = absoluteChange >= 0 ? '+' : '';
+        final moveText =
+            '$changePrefix${moneyFormat.format(absoluteChange)} ($changePrefix${percentChange.toStringAsFixed(2)}%)';
 
         String chartDateLabel(DateTime value) {
           if (useMonthlyBarLabels) {
@@ -9677,298 +9655,393 @@ class _PriceChartState extends State<PriceChart> {
           return DateFormat.yMMMd().format(value);
         }
 
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              spacing: 10,
-              runSpacing: 6,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                if (widget.symbolLabel != null &&
-                    widget.symbolLabel!.trim().isNotEmpty)
-                  Text(
-                    widget.symbolLabel!,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                if (widget.rangeLabel != null)
-                  Text(
-                    '${widget.rangeLabel} ${selectedType.label.toLowerCase()} view',
-                    style: theme.textTheme.labelLarge?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                Text(
-                  '${widget.points.length} trading days',
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
+        return Container(
+          decoration: BoxDecoration(
+            color: chartSurface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: chartBorder),
+            boxShadow: [
+              if (theme.brightness == Brightness.light)
+                BoxShadow(
+                  color: const Color(0xFF0F172A).withValues(alpha: 0.06),
+                  blurRadius: 22,
+                  offset: const Offset(0, 10),
                 ),
-                Text(
-                  dateRangeLabel,
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: PriceChartType.values
-                  .map(
-                    (type) => ChoiceChip(
-                      label: Text(type.label),
-                      selected: selectedType == type,
-                      onSelected: (_) => _setSelectedType(type),
-                    ),
-                  )
-                  .toList(),
-            ),
-            if (widget.showSummaryMetrics) ...[
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 12,
-                runSpacing: 10,
-                children: [
-                  ChartMetricChip(
-                    label: 'Open',
-                    value: moneyFormat.format(latest.open),
-                    color: theme.colorScheme.tertiary,
-                  ),
-                  ChartMetricChip(
-                    label: 'High',
-                    value: moneyFormat.format(highestHigh),
-                    color: bullishColor,
-                  ),
-                  ChartMetricChip(
-                    label: 'Low',
-                    value: moneyFormat.format(lowestLow),
-                    color: bearishColor,
-                  ),
-                  ChartMetricChip(
-                    label: useCurrentPriceLabel ? 'Current' : 'Close',
-                    value: moneyFormat.format(latest.close),
-                    color: changeColor,
-                  ),
-                  ChartMetricChip(
-                    label: 'Move',
-                    value:
-                        '${absoluteChange >= 0 ? '+' : ''}${moneyFormat.format(absoluteChange)} (${percentChange >= 0 ? '+' : ''}${percentChange.toStringAsFixed(2)}%)',
-                    color: changeColor,
-                  ),
-                  ChartMetricChip(
-                    label: 'Volume',
-                    value: compactFormat.format(totalVolume),
-                    color: theme.colorScheme.secondary,
-                  ),
-                ],
-              ),
             ],
-            const SizedBox(height: 12),
-            SizedBox(
-              height: chartHeight,
-              child: switch (selectedType) {
-                PriceChartType.line => LineChart(
-                  LineChartData(
-                    minX: 0,
-                    maxX: max(1, displayPoints.length - 1).toDouble(),
-                    minY: axisScale.minY,
-                    maxY: axisScale.maxY,
-                    borderData: FlBorderData(show: false),
-                    gridData: FlGridData(
-                      show: true,
-                      drawVerticalLine: true,
-                      verticalInterval: verticalInterval,
-                      getDrawingHorizontalLine: (_) =>
-                          FlLine(color: chartGridColor(theme), strokeWidth: 1),
-                      getDrawingVerticalLine: (_) =>
-                          FlLine(color: chartGridColor(theme), strokeWidth: 1),
-                    ),
-                    lineTouchData: LineTouchData(
-                      handleBuiltInTouches: true,
-                      touchTooltipData: LineTouchTooltipData(
-                        fitInsideHorizontally: true,
-                        fitInsideVertically: true,
-                        getTooltipColor: (_) => theme.colorScheme.surface,
-                        getTooltipItems: (spots) => spots
-                            .map(
-                              (spot) => LineTooltipItem(
-                                '${tooltipDateLabel(displayPoints[spot.x.toInt()].date)}\n${moneyFormat.format(spot.y)}',
-                                theme.textTheme.labelMedium!.copyWith(
-                                  color: theme.colorScheme.onSurface,
-                                  fontWeight: FontWeight.w700,
+          ),
+          padding: EdgeInsets.all(chartWidth < 420 ? 12 : 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            if (widget.symbolLabel != null &&
+                                widget.symbolLabel!.trim().isNotEmpty)
+                              Text(
+                                widget.symbolLabel!,
+                                style: theme.textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 0,
                                 ),
                               ),
-                            )
-                            .toList(),
-                      ),
-                    ),
-                    titlesData: FlTitlesData(
-                      topTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      rightTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      leftTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 56,
-                          interval: axisScale.interval,
-                          getTitlesWidget: (value, meta) => Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: Text(
-                              chartAxisLabel(value),
-                              style: axisLabelStyle,
-                            ),
-                          ),
-                        ),
-                      ),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: selectedType == PriceChartType.bar
-                              ? 40
-                              : 32,
-                          interval: 1,
-                          getTitlesWidget: (value, meta) {
-                            final index = value.round();
-                            if (index < 0 ||
-                                index >= displayPoints.length ||
-                                !bottomLabelIndices.contains(index)) {
-                              return const SizedBox.shrink();
-                            }
-                            final point = displayPoints[index];
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 8),
-                              child: Text(
-                                chartDateLabel(point.date),
-                                style: axisLabelStyle,
+                            if (widget.rangeLabel != null)
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 9,
+                                  vertical: 5,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: theme.colorScheme.primaryContainer
+                                      .withValues(alpha: 0.36),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(
+                                    color: theme.colorScheme.primary.withValues(
+                                      alpha: 0.14,
+                                    ),
+                                  ),
+                                ),
+                                child: Text(
+                                  widget.rangeLabel!,
+                                  style: theme.textTheme.labelSmall?.copyWith(
+                                    color: theme.colorScheme.primary,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
                               ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                    lineBarsData: [
-                      LineChartBarData(
-                        spots: closeSpots,
-                        color: changeColor,
-                        isCurved: true,
-                        barWidth: 3,
-                        belowBarData: BarAreaData(
-                          show: true,
-                          color: changeColor.withValues(alpha: 0.14),
-                        ),
-                        dotData: const FlDotData(show: false),
-                      ),
-                    ],
-                  ),
-                ),
-                PriceChartType.bar => BarChart(
-                  BarChartData(
-                    minY: axisScale.minY,
-                    maxY: axisScale.maxY,
-                    alignment: BarChartAlignment.spaceBetween,
-                    gridData: FlGridData(
-                      show: true,
-                      drawVerticalLine: false,
-                      getDrawingHorizontalLine: (_) =>
-                          FlLine(color: chartGridColor(theme), strokeWidth: 1),
-                    ),
-                    borderData: FlBorderData(show: false),
-                    barTouchData: BarTouchData(
-                      enabled: true,
-                      touchTooltipData: BarTouchTooltipData(
-                        fitInsideHorizontally: true,
-                        fitInsideVertically: true,
-                        getTooltipColor: (_) => theme.colorScheme.surface,
-                        getTooltipItem: (group, groupIndex, rod, rodIndex) {
-                          final point = displayPoints[group.x.toInt()];
-                          return BarTooltipItem(
-                            '${tooltipDateLabel(point.date)}\n${moneyFormat.format(rod.toY)}',
-                            theme.textTheme.labelMedium!.copyWith(
-                              color: theme.colorScheme.onSurface,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                    titlesData: FlTitlesData(
-                      topTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      rightTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      leftTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 56,
-                          interval: axisScale.interval,
-                          getTitlesWidget: (value, meta) => Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: Text(
-                              chartAxisLabel(value),
-                              style: axisLabelStyle,
-                            ),
-                          ),
-                        ),
-                      ),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: selectedType == PriceChartType.bar
-                              ? 40
-                              : 32,
-                          interval: 1,
-                          getTitlesWidget: (value, meta) {
-                            final index = value.round();
-                            if (index < 0 ||
-                                index >= displayPoints.length ||
-                                !bottomLabelIndices.contains(index)) {
-                              return const SizedBox.shrink();
-                            }
-                            final point = displayPoints[index];
-                            return Padding(
-                              padding: const EdgeInsets.only(top: 8),
-                              child: Text(
-                                chartDateLabel(point.date),
-                                style: axisLabelStyle,
+                            Text(
+                              dateRangeLabel,
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                                fontWeight: FontWeight.w600,
                               ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                    barGroups: [
-                      for (var i = 0; i < displayPoints.length; i++)
-                        BarChartGroupData(
-                          x: i,
-                          barRods: [
-                            BarChartRodData(
-                              toY: displayPoints[i].close,
-                              width: barWidth,
-                              color:
-                                  displayPoints[i].close >=
-                                      displayPoints[i].open
-                                  ? bullishColor
-                                  : bearishColor,
-                              borderRadius: BorderRadius.circular(4),
                             ),
                           ],
                         ),
-                    ],
+                        const SizedBox(height: 8),
+                        Text(
+                          currentPriceText,
+                          style: theme.textTheme.headlineSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          moveText,
+                          style: theme.textTheme.labelLarge?.copyWith(
+                            color: changeColor,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
+                  const SizedBox(width: 12),
+                  SegmentedButton<PriceChartType>(
+                    showSelectedIcon: false,
+                    segments: PriceChartType.values
+                        .map(
+                          (type) => ButtonSegment<PriceChartType>(
+                            value: type,
+                            label: Text(type.label),
+                          ),
+                        )
+                        .toList(),
+                    selected: {selectedType},
+                    onSelectionChanged: (selection) =>
+                        _setSelectedType(selection.first),
+                    style: ButtonStyle(
+                      visualDensity: VisualDensity.compact,
+                      textStyle: WidgetStatePropertyAll(
+                        theme.textTheme.labelMedium?.copyWith(
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (widget.showSummaryMetrics) ...[
+                const SizedBox(height: 14),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 10,
+                  children: [
+                    ChartMetricChip(
+                      label: 'Open',
+                      value: moneyFormat.format(latest.open),
+                      color: theme.colorScheme.tertiary,
+                    ),
+                    ChartMetricChip(
+                      label: 'High',
+                      value: moneyFormat.format(highestHigh),
+                      color: bullishColor,
+                    ),
+                    ChartMetricChip(
+                      label: 'Low',
+                      value: moneyFormat.format(lowestLow),
+                      color: bearishColor,
+                    ),
+                    ChartMetricChip(
+                      label: useCurrentPriceLabel ? 'Current' : 'Close',
+                      value: moneyFormat.format(latest.close),
+                      color: changeColor,
+                    ),
+                    ChartMetricChip(
+                      label: 'Move',
+                      value:
+                          '${absoluteChange >= 0 ? '+' : ''}${moneyFormat.format(absoluteChange)} (${percentChange >= 0 ? '+' : ''}${percentChange.toStringAsFixed(2)}%)',
+                      color: changeColor,
+                    ),
+                    ChartMetricChip(
+                      label: 'Volume',
+                      value: compactFormat.format(totalVolume),
+                      color: theme.colorScheme.secondary,
+                    ),
+                  ],
                 ),
-              },
-            ),
-          ],
+              ],
+              const SizedBox(height: 14),
+              Container(
+                height: chartHeight,
+                padding: const EdgeInsets.fromLTRB(4, 14, 4, 4),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [chartSurfaceAlt, chartSurface],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: chartBorder.withValues(alpha: 0.7)),
+                ),
+                child: switch (selectedType) {
+                  PriceChartType.line => LineChart(
+                    LineChartData(
+                      minX: 0,
+                      maxX: max(1, displayPoints.length - 1).toDouble(),
+                      minY: axisScale.minY,
+                      maxY: axisScale.maxY,
+                      borderData: FlBorderData(show: false),
+                      gridData: FlGridData(
+                        show: true,
+                        drawVerticalLine: false,
+                        verticalInterval: verticalInterval,
+                        getDrawingHorizontalLine: (_) => FlLine(
+                          color: chartGridColor(theme),
+                          strokeWidth: 1,
+                        ),
+                        getDrawingVerticalLine: (_) => FlLine(
+                          color: chartGridColor(theme),
+                          strokeWidth: 1,
+                        ),
+                      ),
+                      extraLinesData: ExtraLinesData(
+                        horizontalLines: [
+                          HorizontalLine(
+                            y: latest.close,
+                            color: changeColor.withValues(alpha: 0.36),
+                            strokeWidth: 1,
+                            dashArray: [6, 6],
+                          ),
+                        ],
+                      ),
+                      lineTouchData: LineTouchData(
+                        handleBuiltInTouches: true,
+                        touchTooltipData: LineTouchTooltipData(
+                          fitInsideHorizontally: true,
+                          fitInsideVertically: true,
+                          getTooltipColor: (_) => chartSurface,
+                          getTooltipItems: (spots) => spots
+                              .map(
+                                (spot) => LineTooltipItem(
+                                  '${tooltipDateLabel(displayPoints[spot.x.toInt()].date)}\n${moneyFormat.format(spot.y)}',
+                                  theme.textTheme.labelMedium!.copyWith(
+                                    color: theme.colorScheme.onSurface,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              )
+                              .toList(),
+                        ),
+                      ),
+                      titlesData: FlTitlesData(
+                        topTitles: const AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        leftTitles: const AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 58,
+                            interval: axisScale.interval,
+                            getTitlesWidget: (value, meta) => Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: Text(
+                                chartAxisLabel(value),
+                                style: axisLabelStyle,
+                              ),
+                            ),
+                          ),
+                        ),
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 34,
+                            interval: 1,
+                            getTitlesWidget: (value, meta) {
+                              final index = value.round();
+                              if (index < 0 ||
+                                  index >= displayPoints.length ||
+                                  !bottomLabelIndices.contains(index)) {
+                                return const SizedBox.shrink();
+                              }
+                              final point = displayPoints[index];
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text(
+                                  chartDateLabel(point.date),
+                                  style: axisLabelStyle,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                      lineBarsData: [
+                        LineChartBarData(
+                          spots: closeSpots,
+                          color: changeColor,
+                          isCurved: true,
+                          barWidth: 3.4,
+                          belowBarData: BarAreaData(
+                            show: true,
+                            gradient: LinearGradient(
+                              colors: [
+                                changeColor.withValues(alpha: 0.24),
+                                changeColor.withValues(alpha: 0.02),
+                              ],
+                              begin: Alignment.topCenter,
+                              end: Alignment.bottomCenter,
+                            ),
+                          ),
+                          dotData: const FlDotData(show: false),
+                        ),
+                      ],
+                    ),
+                  ),
+                  PriceChartType.bar => BarChart(
+                    BarChartData(
+                      minY: axisScale.minY,
+                      maxY: axisScale.maxY,
+                      alignment: BarChartAlignment.spaceBetween,
+                      gridData: FlGridData(
+                        show: true,
+                        drawVerticalLine: false,
+                        getDrawingHorizontalLine: (_) => FlLine(
+                          color: chartGridColor(theme),
+                          strokeWidth: 1,
+                        ),
+                      ),
+                      borderData: FlBorderData(show: false),
+                      barTouchData: BarTouchData(
+                        enabled: true,
+                        touchTooltipData: BarTouchTooltipData(
+                          fitInsideHorizontally: true,
+                          fitInsideVertically: true,
+                          getTooltipColor: (_) => chartSurface,
+                          getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                            final point = displayPoints[group.x.toInt()];
+                            return BarTooltipItem(
+                              '${tooltipDateLabel(point.date)}\n${moneyFormat.format(rod.toY)}',
+                              theme.textTheme.labelMedium!.copyWith(
+                                color: theme.colorScheme.onSurface,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      titlesData: FlTitlesData(
+                        topTitles: const AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        leftTitles: const AxisTitles(
+                          sideTitles: SideTitles(showTitles: false),
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 58,
+                            interval: axisScale.interval,
+                            getTitlesWidget: (value, meta) => Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: Text(
+                                chartAxisLabel(value),
+                                style: axisLabelStyle,
+                              ),
+                            ),
+                          ),
+                        ),
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 34,
+                            interval: 1,
+                            getTitlesWidget: (value, meta) {
+                              final index = value.round();
+                              if (index < 0 ||
+                                  index >= displayPoints.length ||
+                                  !bottomLabelIndices.contains(index)) {
+                                return const SizedBox.shrink();
+                              }
+                              final point = displayPoints[index];
+                              return Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Text(
+                                  chartDateLabel(point.date),
+                                  style: axisLabelStyle,
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                      barGroups: [
+                        for (var i = 0; i < displayPoints.length; i++)
+                          BarChartGroupData(
+                            x: i,
+                            barRods: [
+                              BarChartRodData(
+                                toY: displayPoints[i].close,
+                                width: barWidth,
+                                color:
+                                    displayPoints[i].close >=
+                                        displayPoints[i].open
+                                    ? bullishColor
+                                    : bearishColor,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                            ],
+                          ),
+                      ],
+                    ),
+                  ),
+                },
+              ),
+            ],
+          ),
         );
       },
     );

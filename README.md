@@ -121,6 +121,18 @@ For iOS simulator on the same machine:
 flutter run -d ios --dart-define=API_BASE_URL=http://localhost:8000
 ```
 
+For a production-style native release run, the Android/iOS app now defaults to
+the Railway API URL used in the mobile setup docs, so you can run:
+
+```bash
+cd flutter_app
+flutter run -d android --release
+flutter run -d ios --release
+```
+
+Use `--dart-define=API_BASE_URL=...` only when you want to override that default,
+for example to point a device build at a staging backend.
+
 The Flutter app includes:
 
 - Sign in / register.

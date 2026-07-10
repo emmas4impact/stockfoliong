@@ -582,6 +582,7 @@ async def background_stock_sync_loop() -> None:
             raise
         except Exception as exc:
             logger.exception("Background stock sync failed")
+            db.rollback()
             with suppress(Exception):
                 record_sync_log(
                     db,
