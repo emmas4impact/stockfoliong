@@ -24,6 +24,7 @@ const _themeModePreferenceKey = 'theme_mode';
 const _webSessionDeadlineKey = 'web_session_deadline_ms';
 const _webSessionExtendedKey = 'web_session_extended';
 const _financialPrivacyPreferenceKey = 'financial_privacy_hidden';
+const _chartTypePreferenceKey = 'preferred_chart_type';
 const _seedColor = Color(0xFF00A86B);
 const _gainColor = Color(0xFF00B67A);
 const _lossColor = Color(0xFFFF5A7A);
@@ -31,6 +32,15 @@ const _darkScaffold = Color(0xFF0B1215);
 const _darkSurface = Color(0xFF101A1E);
 const _darkSurfaceAlt = Color(0xFF142126);
 const _lightScaffold = Color(0xFFEDF2F7);
+const _marketIdeasFallbackDisclaimer =
+    'Stockfolio NG highlights data-driven watchlist ideas only. '
+    'It is not a financial adviser app. Contact your broker for detailed analysis.';
+
+final ValueNotifier<int> marketDataRefreshSignal = ValueNotifier<int>(0);
+
+void notifyMarketDataRefreshed() {
+  marketDataRefreshSignal.value++;
+}
 
 String stockLogoUrl(String symbol) =>
     '$apiBaseUrl/public/stocks/${Uri.encodeComponent(symbol)}/logo';

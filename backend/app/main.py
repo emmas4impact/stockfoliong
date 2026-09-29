@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from .auth import create_access_token, get_current_superuser, get_current_user, hash_password, verify_password
 from .database import Base, SessionLocal, engine, get_db
+from .analysis import latest_observations, score_observation
+from .models import StockAnalysis
 from .legal import render_account_deletion_html, render_privacy_policy_html
 from .models import AccountDeletionRequest, PortfolioHolding, PushDeviceToken, Stock, StockPrice, User
 from .notifications import portfolio_report_pdf, send_email
@@ -1115,6 +1117,37 @@ def get_market_ideas(
     _: User = Depends(get_current_user),
 ) -> dict:
     return market_ideas_payload(db, limit)
+
+
+@app.get("/stocks/{symbol}/analysis")
+def get_stock_analysis(
+    symbol: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict:
+    symbol = symbol.strip().upper()
+    if db.get(Stock, symbol) is None:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    universe = latest_observations(db)
+    target = next((row for row in universe if row.stock_symbol == symbol), None)
+    if target is None:
+        raise HTTPException(status_code=503, detail="Analysis awaits a successful market data sync")
+    return {**score_observation(target, universe), "generated_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/stocks/{symbol}/analysis/history")
+def get_stock_analysis_history(
+    symbol: str,
+    limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[dict]:
+    symbol = symbol.strip().upper()
+    if db.get(Stock, symbol) is None:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    return [row.result for row in db.scalars(select(StockAnalysis).where(
+        StockAnalysis.stock_symbol == symbol,
+    ).order_by(StockAnalysis.generated_at.desc(), StockAnalysis.id.desc()).limit(limit))]
 
 
 @app.get("/stocks", response_model=list[StockOut])

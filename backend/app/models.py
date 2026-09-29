@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -83,6 +83,29 @@ class StockPrice(TimestampMixin, Base):
     volume: Mapped[float | None] = mapped_column(Numeric(20, 2), nullable=True)
 
     stock: Mapped[Stock] = relationship(back_populates="prices")
+
+
+class FundamentalObservation(Base):
+    __tablename__ = "fundamental_observations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    observation_key: Mapped[str] = mapped_column(String(64), unique=True)
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source: Mapped[str] = mapped_column(String(64))
+    inputs: Mapped[dict] = mapped_column(JSON)
+
+
+class StockAnalysis(Base):
+    __tablename__ = "stock_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    analysis_key: Mapped[str] = mapped_column(String(64), unique=True)
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), index=True)
+    observation_id: Mapped[int] = mapped_column(ForeignKey("fundamental_observations.id"))
+    model_version: Mapped[str] = mapped_column(String(64))
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict] = mapped_column(JSON)
 
 
 class SyncLog(TimestampMixin, Base):

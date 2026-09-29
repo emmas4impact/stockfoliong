@@ -22,6 +22,7 @@ from .ngx_client import (
 )
 from .settings import get_settings
 from .schemas import HoldingUpsert
+from .analysis import record_observation, archive_sync_analysis
 
 
 def upsert_stock(db: Session, stock_data: dict) -> Stock:
@@ -117,6 +118,7 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
     history_count = 0
     for stock_data in stocks:
         stock = upsert_stock(db, stock_data)
+        record_observation(db, stock_data)
         if include_history and (settings.ngxpulse_enabled or stock.ngx_id):
             history_count += upsert_stock_history(
                 db,
@@ -126,6 +128,7 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
             )
         history_count += upsert_daily_stock_snapshot(db, stock)
 
+    archive_sync_analysis(db)
     record_sync_log(
         db,
         status="success",
