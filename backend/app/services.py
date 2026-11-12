@@ -32,8 +32,13 @@ def upsert_stock(db: Session, stock_data: dict) -> Stock:
         stock = Stock(symbol=stock_data["symbol"])
         db.add(stock)
 
+    # A new quote must not inherit yesterday's (possibly corrupted) comparison
+    # prices or returns. Keep the existing carry-forward policy for metadata.
+    quote_fields = {"previous_close", "open_price", "high_price", "low_price",
+                    "change", "percent_change", "margin"}
+    fresh_quote = stock_data.get("source") in {"ngx_doclib", "ngxpulse"} and stock_data.get("last_price") is not None
     for field, value in stock_data.items():
-        if hasattr(stock, field) and value is not None:
+        if hasattr(stock, field) and (value is not None or (fresh_quote and field in quote_fields)):
             setattr(stock, field, value)
     db.flush()
     return stock

@@ -8228,7 +8228,7 @@ class _PortfolioOverviewHero extends StatelessWidget {
             children: [
               _HeroInfoPill(
                 icon: Icons.rocket_launch_outlined,
-                label: 'Best today',
+                label: 'Best since purchase',
                 value: bestHolding == null
                     ? '-'
                     : '${bestHolding!.symbol} ${(bestHolding!.profitLossPercent ?? 0).toStringAsFixed(2)}%',

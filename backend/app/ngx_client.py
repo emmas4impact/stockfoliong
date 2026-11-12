@@ -178,21 +178,20 @@ def normalize_stock(raw: dict[str, Any], source: str) -> dict[str, Any] | None:
         return None
 
     symbol_text = str(symbol).strip().upper()
-    last_price = _number(
-        _first(
-            raw,
-            [
-                "Value",
-                "last_price",
-                "lastPrice",
-                "price",
-                "currentPrice",
-                "current_price",
-                "close",
-                "Close",
-            ],
-        )
-    )
+    # Doclib's ticker Value is a unit price. Kobo's value is not a quote.
+    price_fields = ["current_price", "currentPrice", "last_price", "lastPrice",
+                    "price", "close_price", "closing_price", "close"]
+    if source == "ngx_doclib":
+        price_fields.insert(0, "Value")
+    last_price = None
+    for field in price_fields:
+        value = _first(raw, [field])
+        price = None if isinstance(value, bool) else _number(value)
+        if price is not None and math.isfinite(price) and price > 0:
+            last_price = price
+            break
+    if last_price is None:
+        return None
     previous_close = _number(_first(raw, ["previous_close", "previousClose", "pclose", "prevClose"]))
     raw_absolute_change = _number(
         _first(raw, ["Change", "change", "change_amount", "changeAmount", "price_change", "absolute_change"])
@@ -326,11 +325,14 @@ def _fetch_all_stocks_from_ngxpulse() -> list[dict[str, Any]]:
                 f"NGX Pulse stocks response did not include an equities list. Payload keys: {payload_keys or 'none'}."
             )
         raise NgxFetchError("NGX Pulse stocks response did not include an equities list.")
-    return [
+    stocks = [
         stock
         for item in results
         if isinstance(item, dict) and (stock := normalize_stock(item, "ngxpulse"))
     ]
+    if not stocks:
+        raise NgxFetchError("NGX Pulse returned no equities with a usable per-share price.")
+    return stocks
 
 
 def fetch_kobo_fundamentals() -> dict[str, dict]:
