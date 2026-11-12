@@ -23,6 +23,7 @@ from .models import AccountDeletionRequest, PortfolioHolding, PushDeviceToken, S
 from .notifications import portfolio_report_pdf, send_email
 from .ngx_client import (
     NgxFetchError,
+    active_offers,
     discover_stock_ngx_id,
     fetch_all_stocks_from_ngx_cached,
     fetch_stock_logo,
@@ -42,6 +43,7 @@ from .schemas import (
     MarketIdeaOut,
     MarketLeadersOut,
     MarketNewsOut,
+    MarketOfferOut,
     MarketSnapshotOut,
     MarketStatusOut,
     MessageResponse,
@@ -1203,6 +1205,14 @@ def get_stock_dividends(
     return get_cached_dividend_history(db, stock.symbol, limit)
 
 
+@app.get("/public/market/offers", response_model=list[MarketOfferOut])
+def get_market_offers() -> list[dict]:
+    try:
+        return active_offers()
+    except NgxFetchError as exc:
+        raise HTTPException(status_code=503, detail="Offer information unavailable.") from exc
+
+
 @app.get("/stocks/{symbol}/disclosures", response_model=list[DisclosureOut])
 def get_stock_disclosures(
     symbol: str,
@@ -1294,7 +1304,14 @@ def build_stock_detail(
     disclosures: list[dict] = []
     if settings.ngxpulse_enabled:
         dividends = get_cached_dividend_history(db, stock.symbol, 10)
-        disclosures = get_cached_disclosures(db, stock.symbol, news_limit)
+        disclosures = get_cached_disclosures(db, stock.symbol, 1000)
+
+    try:
+        offers = [row for row in active_offers() if row["symbol"] == stock.symbol or (
+            not row["symbol"] and row["name"].casefold() == (stock.name or "").strip().casefold()
+        )]
+    except NgxFetchError:
+        offers = []
 
     return {
         "stock": stock,
@@ -1304,6 +1321,7 @@ def build_stock_detail(
         "news": news,
         "dividends": dividends,
         "disclosures": disclosures,
+        "offers": offers,
     }
 
 

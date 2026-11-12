@@ -102,6 +102,15 @@ Use `include_history=true` when you want to backfill chart data. That is slower 
 
 ## Flutter App
 
+Stock detail on web, Android, and iOS shows recent NGX filings with links to
+the original PDFs. Set `NGXPULSE_API_KEY` on the API server for the Kobo
+disclosures feed; do not include the key in Flutter builds. "View all" shows
+that company's filings in the provider's latest bulk feed, not a lifetime archive.
+
+The home and landing screens display current IPOs, public offers and rights
+issues from Kobo's NGX Invest snapshot. The panel is hidden for empty or stale
+snapshots. Offer dates come from the offer feed, never from filing timestamps.
+
 Run the app in a separate terminal:
 
 ```bash

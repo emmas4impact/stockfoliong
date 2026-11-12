@@ -14,7 +14,7 @@ from .ngx_client import (
     fetch_all_stocks_from_ngx_cached,
     fetch_kobo_fundamentals,
     fetch_company_news_cached,
-    fetch_disclosures_cached,
+    fetch_disclosure_feed,
     fetch_dividend_history_cached,
     fetch_historical_prices_cached,
     fetch_market_snapshot_from_ngx,
@@ -64,8 +64,7 @@ def dividend_cache_key(symbol: str, limit: int = 10) -> str:
     return f"dividends:{symbol.strip().upper()}:{limit}"
 
 
-def disclosure_cache_key(symbol: str, limit: int = 8) -> str:
-    return f"disclosures:{symbol.strip().upper()}:{limit}"
+DISCLOSURE_FEED_KEY = "kobo_disclosures"
 
 
 def record_sync_log(
@@ -373,20 +372,13 @@ def get_cached_disclosures(
     db: Session,
     symbol: str,
     limit: int = 8,
-    *,
-    refresh_if_missing: bool = True,
 ) -> list[dict]:
-    cache_key = disclosure_cache_key(symbol, limit)
-    cached = get_cached_list_payload(db, cache_key)
-    if cached or not refresh_if_missing:
-        return cached
     try:
-        disclosures = fetch_disclosures_cached(symbol, limit)
+        feed = fetch_disclosure_feed()
     except NgxFetchError:
-        return []
-    cache_api_payload(db, cache_key=cache_key, payload=disclosures, source="ngxpulse_disclosures")
-    db.commit()
-    return disclosures
+        feed = get_cached_list_payload(db, DISCLOSURE_FEED_KEY)
+    symbol = symbol.strip().upper()
+    return [row for row in feed if row["symbol"] == symbol][:limit]
 
 
 def upsert_stock_history(
@@ -660,6 +652,14 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
                 message=f"Market news cache refresh failed: {exc}",
             )
 
+    if get_settings().ngxpulse_enabled:
+        try:
+            cache_api_payload(db, cache_key=DISCLOSURE_FEED_KEY, payload=fetch_disclosure_feed(),
+                              source="kobo_disclosures")
+            cache_entries += 1
+        except NgxFetchError as exc:
+            record_sync_log(db, status="warning", source=REFERENCE_CACHE_SYNC_SOURCE, message=str(exc))
+
     for stock in stocks:
         if stock.supports_history:
             history_rows += upsert_stock_history(
@@ -677,16 +677,6 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
                 cache_key=dividend_cache_key(stock.symbol, 10),
                 payload=fetch_dividend_history_cached(stock.symbol, 10),
                 source="ngxpulse_dividends",
-            )
-            cache_entries += 1
-        except NgxFetchError:
-            pass
-        try:
-            cache_api_payload(
-                db,
-                cache_key=disclosure_cache_key(stock.symbol, 8),
-                payload=fetch_disclosures_cached(stock.symbol, 8),
-                source="ngxpulse_disclosures",
             )
             cache_entries += 1
         except NgxFetchError:

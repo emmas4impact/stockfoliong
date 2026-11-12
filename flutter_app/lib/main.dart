@@ -1151,6 +1151,12 @@ class ApiClient {
         .toList();
   }
 
+  Future<List<MarketOffer>> publicOffers() async {
+    final response = await _client.get(_uri('/public/market/offers'));
+    _expect(response, 200);
+    return MarketOffer.parseList(jsonDecode(response.body) as List);
+  }
+
   Future<List<MarketNewsItem>> publicMarketNews({int limit = 6}) async {
     final response = await _client.get(
       _uri('/public/market/news', {'limit': '$limit'}),
@@ -1427,6 +1433,7 @@ class StockDetailBundle {
     required this.news,
     required this.dividends,
     required this.disclosures,
+    this.offers = const [],
   });
 
   final Stock stock;
@@ -1436,6 +1443,7 @@ class StockDetailBundle {
   final List<CompanyNewsItem> news;
   final List<DividendRecord> dividends;
   final List<DisclosureItem> disclosures;
+  final List<MarketOffer> offers;
 
   factory StockDetailBundle.fromJson(Map<String, dynamic> json) {
     final historyJson = json['history'] as List<dynamic>? ?? const [];
@@ -1462,6 +1470,7 @@ class StockDetailBundle {
       disclosures: disclosuresJson
           .map((item) => DisclosureItem.fromJson(item as Map<String, dynamic>))
           .toList(),
+      offers: MarketOffer.parseList(json['offers'] as List? ?? const []),
     );
   }
 }
@@ -1871,6 +1880,19 @@ class DividendRecord {
   }
 }
 
+class MarketOffer {
+  const MarketOffer(this.name, this.kind, this.status, this.nextDate, this.url);
+  final String name, kind, status, url;
+  final DateTime? nextDate;
+
+  static List<MarketOffer> parseList(List rows) => [
+    for (final row in rows.whereType<Map<String, dynamic>>())
+      MarketOffer(row['name'] as String, row['kind'] as String,
+        row['status'] as String, DateTime.tryParse(row['next_date'] as String? ?? ''),
+        row['url'] as String),
+  ];
+}
+
 class DisclosureItem {
   DisclosureItem({
     this.title,
@@ -2070,6 +2092,7 @@ class _AuthScreenState extends State<AuthScreen> {
   String? emailError;
   String? passwordError;
   late Future<LandingMarketData> landingFuture = _loadLandingData();
+  late Future<List<MarketOffer>> offersFuture = widget.api.publicOffers();
   late final Future<PackageInfo> packageInfoFuture = PackageInfo.fromPlatform();
   Timer? landingRefreshTimer;
   Timer? marketMotionTimer;
@@ -2082,6 +2105,7 @@ class _AuthScreenState extends State<AuthScreen> {
       if (!mounted) return;
       setState(() {
         landingFuture = _loadLandingData();
+        offersFuture = widget.api.publicOffers();
       });
     });
     marketMotionTimer = Timer.periodic(const Duration(seconds: 4), (_) {
@@ -2271,6 +2295,7 @@ class _AuthScreenState extends State<AuthScreen> {
                         setState(() => passwordError = null),
                   );
                   final marketView = _LandingMarketView(
+                    offersFuture: offersFuture,
                     theme: theme,
                     landing: landing,
                     loading:
@@ -2330,6 +2355,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     onRefresh: () async {
                       setState(() {
                         landingFuture = _loadLandingData();
+                        offersFuture = widget.api.publicOffers();
                       });
                       await landingFuture;
                     },
@@ -2579,6 +2605,7 @@ class _AuthHeroPanel extends StatelessWidget {
 
 class _LandingMarketView extends StatelessWidget {
   const _LandingMarketView({
+    required this.offersFuture,
     required this.theme,
     required this.landing,
     required this.loading,
@@ -2588,6 +2615,7 @@ class _LandingMarketView extends StatelessWidget {
 
   final ThemeData theme;
   final LandingMarketData? landing;
+  final Future<List<MarketOffer>> offersFuture;
   final bool loading;
   final Stock? headlineStock;
   final ValueChanged<Stock> onOpenStock;
@@ -2782,6 +2810,7 @@ class _LandingMarketView extends StatelessWidget {
             );
           },
         ),
+        _AsyncOffers(future: offersFuture),
         if (landing?.news.isNotEmpty == true) ...[
           const SizedBox(height: 16),
           MarketNewsPanel(
@@ -3662,19 +3691,12 @@ class _LandingStockDetailSheetState extends State<LandingStockDetailSheet> {
                   else
                     ...dividends.map((item) => DividendTile(item: item)),
                   const SizedBox(height: 18),
-                  Text(
-                    'Recent disclosures',
-                    style: Theme.of(context).textTheme.titleMedium,
+                  DisclosureSection(
+                    key: ValueKey(resolvedStock.symbol),
+                    filings: disclosures,
+                    offers: detail?.offers ?? const [],
+                    loading: loading,
                   ),
-                  const SizedBox(height: 8),
-                  if (disclosures.isEmpty)
-                    Text(
-                      loading
-                          ? 'Loading disclosures...'
-                          : 'No recent disclosures available.',
-                    )
-                  else
-                    ...disclosures.map((item) => DisclosureTile(item: item)),
                   const SizedBox(height: 18),
                   Text(
                     'Company updates',
@@ -4691,6 +4713,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late Future<MarketLeaders> leadersFuture = widget.api.marketLeaders();
   late Future<MarketIdeasBundle> ideasFuture = widget.api.marketIdeas();
   late Future<List<MarketNewsItem>> newsFuture = widget.api.marketNews();
+  late Future<List<MarketOffer>> offersFuture = widget.api.publicOffers();
   Timer? refreshTimer;
 
   @override
@@ -4719,6 +4742,7 @@ class _HomeScreenState extends State<HomeScreen> {
       leadersFuture = widget.api.marketLeaders();
       ideasFuture = widget.api.marketIdeas();
       newsFuture = widget.api.marketNews();
+      offersFuture = widget.api.publicOffers();
     });
   }
 
@@ -4911,6 +4935,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 },
               ),
               const SizedBox(height: 16),
+              _AsyncOffers(future: offersFuture),
               FutureBuilder<List<MarketNewsItem>>(
                 future: newsFuture,
                 builder: (context, newsSnapshot) {
@@ -6355,19 +6380,12 @@ class PortfolioHoldingDetail extends StatelessWidget {
                 else
                   ...dividends.map((item) => DividendTile(item: item)),
                 const SizedBox(height: 18),
-                Text(
-                  'Recent disclosures',
-                  style: Theme.of(context).textTheme.titleMedium,
+                DisclosureSection(
+                  key: ValueKey(holding!.symbol),
+                  filings: disclosures,
+                  offers: detail?.offers ?? const [],
+                  loading: loading,
                 ),
-                const SizedBox(height: 8),
-                if (disclosures.isEmpty)
-                  Text(
-                    loading
-                        ? 'Loading disclosures...'
-                        : 'No recent disclosures available.',
-                  )
-                else
-                  ...disclosures.map((item) => DisclosureTile(item: item)),
                 const SizedBox(height: 18),
                 Text(
                   'Company updates',
@@ -6501,6 +6519,80 @@ class DividendTile extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _AsyncOffers extends StatelessWidget {
+  const _AsyncOffers({required this.future});
+  final Future<List<MarketOffer>> future;
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<List<MarketOffer>>(
+    future: future,
+    builder: (_, snapshot) => OfferPanel(offers: snapshot.data ?? const []),
+  );
+}
+
+class OfferPanel extends StatelessWidget {
+  const OfferPanel({super.key, required this.offers});
+  final List<MarketOffer> offers;
+
+  @override
+  Widget build(BuildContext context) {
+    if (offers.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('IPOs & share offers', style: Theme.of(context).textTheme.titleMedium),
+        for (final offer in offers)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.event_note_outlined),
+            title: Text(offer.name),
+            subtitle: Text([
+              offer.kind, offer.status,
+              if (offer.nextDate != null)
+                '${offer.status == 'Upcoming' ? 'Opens' : 'Closes'} ${DateFormat.yMMMd().format(offer.nextDate!)}',
+            ].join(' / ')),
+            trailing: const Icon(Icons.open_in_new, semanticLabel: 'View official offer'),
+            onTap: () => openExternalUrl(context, offer.url),
+          ),
+      ]),
+    );
+  }
+}
+
+class DisclosureSection extends StatefulWidget {
+  const DisclosureSection({super.key, required this.filings, required this.offers, required this.loading});
+  final List<DisclosureItem> filings;
+  final List<MarketOffer> offers;
+  final bool loading;
+
+  @override
+  State<DisclosureSection> createState() => _DisclosureSectionState();
+}
+
+class _DisclosureSectionState extends State<DisclosureSection> {
+  bool expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final filings = widget.filings;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      OfferPanel(offers: widget.offers),
+      Text('Recent disclosures', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: 8),
+      if (filings.isEmpty)
+        Text(widget.loading ? 'Loading disclosures...' : 'No recent disclosures available.'),
+      for (final item in expanded ? filings : filings.take(3))
+        DisclosureTile(item: item),
+      if (filings.length > 3)
+        Align(alignment: Alignment.centerLeft, child: TextButton.icon(
+          icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+          label: Text(expanded ? 'Show less' : 'View all (${filings.length})'),
+          onPressed: () => setState(() => expanded = !expanded),
+        )),
+    ]);
   }
 }
 

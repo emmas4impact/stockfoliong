@@ -223,6 +223,15 @@ class MarketNewsOut(BaseModel):
     image_url: str | None = None
 
 
+class MarketOfferOut(BaseModel):
+    name: str
+    symbol: str | None = None
+    kind: str
+    status: str
+    next_date: date | None = None
+    url: str
+
+
 class StockDetailOut(BaseModel):
     stock: StockOut
     history: list[StockPriceOut]
@@ -231,6 +240,7 @@ class StockDetailOut(BaseModel):
     news: list[CompanyNewsOut] = []
     dividends: list[DividendHistoryOut] = []
     disclosures: list[DisclosureOut] = []
+    offers: list[MarketOfferOut] = []
 
 
 class MarketLeadersOut(BaseModel):
