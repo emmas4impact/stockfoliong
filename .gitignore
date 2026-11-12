@@ -126,6 +126,7 @@ celerybeat.pid
 
 # Environments
 .env
+.privacy-local/
 .venv
 env/
 venv/
