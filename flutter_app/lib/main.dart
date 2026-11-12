@@ -18,6 +18,7 @@ import 'push_notifications.dart';
 import 'profile_image_picker_stub.dart'
     if (dart.library.html) 'profile_image_picker_web.dart';
 import 'stock_logo_assets.dart';
+import 'sector_valuation.dart';
 
 final apiBaseUrl = normalizeApiBaseUrl(configuredApiBaseUrl());
 const _themeModePreferenceKey = 'theme_mode';
@@ -945,6 +946,24 @@ class ApiClient {
     return data
         .map((item) => DividendRecord.fromJson(item as Map<String, dynamic>))
         .toList();
+  }
+
+  Future<SectorValuation?> sectorValuation(String symbol) async {
+    final response = await _client
+        .get(
+          _uri('/stocks/${Uri.encodeComponent(symbol)}/analysis'),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode == 503 &&
+        jsonDecode(response.body)['detail'] ==
+            'Analysis awaits a successful market data sync') {
+      return null;
+    }
+    _expect(response, 200);
+    return SectorValuation.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
   }
 
   Future<StockDetailBundle> stockDetail(
@@ -3421,10 +3440,12 @@ class LandingStockDetailSheet extends StatefulWidget {
     super.key,
     required this.api,
     required this.stock,
+    this.showValuation = false,
   });
 
   final ApiClient api;
   final Stock stock;
+  final bool showValuation;
 
   @override
   State<LandingStockDetailSheet> createState() =>
@@ -3598,6 +3619,13 @@ class _LandingStockDetailSheetState extends State<LandingStockDetailSheet> {
                       ),
                     ],
                   ),
+                  if (widget.showValuation) ...[
+                    const SizedBox(height: 18),
+                    SectorValuationSection(
+                      symbol: widget.stock.symbol,
+                      load: widget.api.sectorValuation,
+                    ),
+                  ],
                   const SizedBox(height: 18),
                   Text(
                     'Dividend history',
@@ -4675,7 +4703,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _openStockDetail(Stock stock) async {
     final compact = MediaQuery.of(context).size.width < 760;
-    final content = LandingStockDetailSheet(api: widget.api, stock: stock);
+    final content = LandingStockDetailSheet(
+      api: widget.api,
+      stock: stock,
+      showValuation: true,
+    );
     if (compact) {
       await showModalBottomSheet<void>(
         context: context,
@@ -5749,6 +5781,7 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
                   builder: (context, constraints) {
                     final selected = selectedHolding;
                     final detail = PortfolioHoldingDetail(
+                      api: widget.api,
                       holding: selected,
                       detailFuture: selectedDetailFuture,
                       selectedRange: selectedDetailRange,
@@ -6108,12 +6141,14 @@ class PortfolioHoldingDetail extends StatelessWidget {
   const PortfolioHoldingDetail({
     super.key,
     required this.holding,
+    required this.api,
     required this.detailFuture,
     required this.selectedRange,
     required this.onRangeSelected,
   });
 
   final Holding? holding;
+  final ApiClient api;
   final Future<StockDetailBundle>? detailFuture;
   final StockHistoryRange selectedRange;
   final ValueChanged<StockHistoryRange> onRangeSelected;
@@ -6285,6 +6320,11 @@ class PortfolioHoldingDetail extends StatelessWidget {
                           : moneyFormat.format(marketSnapshot!.value),
                     ),
                   ],
+                ),
+                const SizedBox(height: 18),
+                SectorValuationSection(
+                  symbol: holding!.symbol,
+                  load: api.sectorValuation,
                 ),
                 const SizedBox(height: 18),
                 Text(
@@ -6833,6 +6873,7 @@ class _StocksScreenState extends State<StocksScreen> {
                   children: [
                     if (selectedStock != null) ...[
                       PortfolioHoldingDetail(
+                        api: widget.api,
                         holding: Holding.fromStock(selectedStock!),
                         detailFuture: selectedDetailFuture,
                         selectedRange: selectedDetailRange,
