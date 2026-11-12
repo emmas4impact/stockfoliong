@@ -1,6 +1,7 @@
 import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["JWT_SECRET_KEY"] = "test-only-not-a-deployment-secret"
@@ -10,11 +11,37 @@ from sqlalchemy.orm import Session
 
 from backend.app.database import Base
 from backend.app.models import Stock, StockPrice
-from backend.app.ngx_client import normalize_stock
-from backend.app.services import holding_to_dict, upsert_daily_stock_snapshot, upsert_stock
+from backend.app.ngx_client import NgxFetchError, normalize_stock
+from backend.app.services import holding_to_dict, price_holdings, upsert_daily_stock_snapshot, upsert_stock
 
 
 class QuotePriceTests(unittest.TestCase):
+    @patch("backend.app.services.fetch_all_stocks_from_ngx_cached")
+    def test_portfolio_recovers_waiting_quotes_in_one_lookup(self, fetch):
+        def holding(symbol, qty, cost, saved_price, field=None):
+            return SimpleNamespace(stock_symbol=symbol, quantity=qty, avg_purchase_price=cost,
+                                   notes=None, stock=Stock(symbol=symbol, last_price=saved_price,
+                                                           source="ngxpulse", unit_price_field=field))
+
+        access = holding("ACCESSCORP", 166350, 21.959, 158940297.10)
+        fidelity = holding("FIDELITYBK", 20390, 11.16, None)
+        gtco = holding("GTCO", 14600, 43.12, 119.5, "current_price")
+        fetch.return_value = [normalize_stock({"symbol": "ACCESSCORP", "current_price": 27,
+                                               "value": 158940297.10}, "ngxpulse")]
+        rows = price_holdings([access, fidelity, gtco])
+        fetch.assert_called_once_with()
+        self.assertEqual(rows[0]["current_price"], 27)
+        self.assertEqual(rows[0]["total_value"], 4491450)
+        self.assertAlmostEqual(rows[0]["profit_loss"], 4491450 - 166350 * 21.959)
+        self.assertIsNone(rows[1]["total_value"])
+        self.assertIsNone(rows[1]["profit_loss_percent"])
+        self.assertEqual(rows[2]["total_value"], 1744700)
+        fetch.reset_mock()
+        self.assertEqual(price_holdings([gtco])[0], rows[2])
+        fetch.assert_not_called()
+        fetch.side_effect = NgxFetchError("provider unavailable")
+        self.assertIsNone(price_holdings([access])[0]["current_price"])
+
     def test_dangcem_kobo_equities_record(self):
         raw = {
             "symbol": "DANGCEM", "name": "Dangote Cement Plc",

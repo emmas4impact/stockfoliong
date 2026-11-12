@@ -1,4 +1,5 @@
 import json
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, select
@@ -10,6 +11,7 @@ from .ngx_client import (
     NgxFetchError,
     clear_runtime_caches,
     fetch_all_stocks_from_ngx,
+    fetch_all_stocks_from_ngx_cached,
     fetch_kobo_fundamentals,
     fetch_company_news_cached,
     fetch_disclosures_cached,
@@ -485,13 +487,13 @@ def upsert_daily_stock_snapshot(db: Session, stock: Stock) -> int:
     return 1
 
 
-def holding_to_dict(holding: PortfolioHolding) -> dict:
+def holding_to_dict(holding: PortfolioHolding, *, fallback_price: float | None = None) -> dict:
     stock = holding.stock
     # Pre-fix Kobo rows may contain turnover; wait for a normalized price on resync.
     usable = stock and stock.last_price is not None and stock.last_price > 0 and (
         stock.source != "ngxpulse" or stock.unit_price_field is not None
     )
-    current_price = float(stock.last_price) if usable else None
+    current_price = float(stock.last_price) if usable else fallback_price
     quantity = float(holding.quantity)
     avg_price = float(holding.avg_purchase_price)
     total_cost = quantity * avg_price
@@ -511,6 +513,24 @@ def holding_to_dict(holding: PortfolioHolding) -> dict:
         "profit_loss_percent": profit_loss_percent,
         "notes": holding.notes,
     }
+
+
+def price_holdings(holdings: Sequence[PortfolioHolding]) -> list[dict]:
+    rows = [holding_to_dict(h) for h in holdings]
+    missing = {h.stock_symbol for h, row in zip(holdings, rows)
+               if row["current_price"] is None and h.stock and h.stock.source in {"ngxpulse", "ngx_doclib"}}
+    if not missing:
+        return rows
+
+    # A corrected live quote can precede the next persisted sync. Only accept
+    # the same per-share fields that the ingest parser has already verified.
+    try:
+        quotes = {q["symbol"]: q["last_price"] for q in fetch_all_stocks_from_ngx_cached()
+                  if q["symbol"] in missing and q.get("unit_price_field") and q.get("last_price") is not None}
+    except NgxFetchError:
+        return rows
+    return [holding_to_dict(h, fallback_price=quotes[h.stock_symbol]) if h.stock_symbol in quotes else row
+            for h, row in zip(holdings, rows)]
 
 
 def upsert_holding(db: Session, user: User, payload: HoldingUpsert) -> PortfolioHolding:

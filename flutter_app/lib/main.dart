@@ -1369,16 +1369,18 @@ class Holding {
   final String? notes;
 
   factory Holding.fromJson(Map<String, dynamic> json) {
+    final quote = asDouble(json['current_price']);
+    final priced = quote != null && quote.isFinite && quote > 0;
     return Holding(
       symbol: json['stock_symbol'] as String,
       name: json['stock_name'] as String?,
       quantity: asDouble(json['quantity']) ?? 0,
       avgPurchasePrice: asDouble(json['avg_purchase_price']) ?? 0,
-      currentPrice: asDouble(json['current_price']),
-      totalValue: asDouble(json['total_value']),
+      currentPrice: priced ? quote : null,
+      totalValue: priced ? asDouble(json['total_value']) : null,
       totalCost: asDouble(json['total_cost']) ?? 0,
-      profitLoss: asDouble(json['profit_loss']),
-      profitLossPercent: asDouble(json['profit_loss_percent']),
+      profitLoss: priced ? asDouble(json['profit_loss']) : null,
+      profitLossPercent: priced ? asDouble(json['profit_loss_percent']) : null,
       notes: json['notes'] as String?,
     );
   }
@@ -5700,6 +5702,16 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
     return FutureBuilder<List<Holding>>(
       future: future,
       builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          if (snapshot.hasError) {
+            return Center(child: TextButton.icon(
+              onPressed: refresh,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Could not load portfolio. Retry'),
+            ));
+          }
+          return const Center(child: CircularProgressIndicator());
+        }
         final holdings = snapshot.data ?? [];
         final totals = PortfolioTotals(holdings);
         final profitLoss = totals.profit;

@@ -71,7 +71,7 @@ from .services import (
     get_cached_market_news,
     get_cached_market_snapshot,
     get_cached_market_status,
-    holding_to_dict,
+    price_holdings,
     record_sync_log,
     reference_cache_refresh_due,
     refresh_reference_caches,
@@ -1025,7 +1025,7 @@ def email_portfolio_report(
         .where(PortfolioHolding.user_id == user.id)
         .order_by(PortfolioHolding.stock_symbol)
     ).all()
-    holding_rows = [holding_to_dict(holding) for holding in holdings]
+    holding_rows = price_holdings(holdings)
     pdf = portfolio_report_pdf(user, holding_rows)
 
     if not settings.email_enabled:
@@ -1453,7 +1453,7 @@ def list_holdings(db: Session = Depends(get_db), user: User = Depends(get_curren
         .where(PortfolioHolding.user_id == user.id)
         .order_by(PortfolioHolding.stock_symbol)
     ).all()
-    return [holding_to_dict(holding) for holding in holdings]
+    return price_holdings(holdings)
 
 
 @app.post("/portfolio/holdings", response_model=HoldingOut)
@@ -1463,7 +1463,7 @@ def save_holding(
     user: User = Depends(get_current_user),
 ) -> dict:
     holding = upsert_holding(db, user, payload)
-    return holding_to_dict(holding)
+    return price_holdings([holding])[0]
 
 
 @app.delete("/portfolio/holdings/{symbol}", status_code=status.HTTP_204_NO_CONTENT)
