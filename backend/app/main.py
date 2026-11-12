@@ -20,7 +20,7 @@ from .analysis import latest_observations, score_observation
 from .models import StockAnalysis
 from .legal import render_account_deletion_html, render_privacy_policy_html
 from .models import AccountDeletionRequest, PortfolioHolding, PushDeviceToken, Stock, StockPrice, User
-from .personal_data_migration import require_ready
+from .personal_data_migration import configure_storage
 from .notifications import portfolio_report_pdf, send_email
 from .ngx_client import (
     NgxFetchError,
@@ -655,7 +655,7 @@ def ensure_runtime_schema() -> None:
 async def startup() -> None:
     global stock_sync_task
     with engine.connect() as conn:
-        require_ready(conn)
+        configure_storage(conn)
     Base.metadata.create_all(bind=engine)
     ensure_runtime_schema()
     if settings.enable_background_stock_sync:

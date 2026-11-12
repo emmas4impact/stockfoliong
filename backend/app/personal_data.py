@@ -60,7 +60,17 @@ class EncryptedText(TypeDecorator):
         self.searchable = searchable
 
     def process_bind_param(self, value, dialect):
+        if getattr(dialect, "_personal_data_encrypted", True) is False:
+            return self._legacy_value(value)
         return None if value is None else encrypt(value, self.scope, self.searchable)
 
     def process_result_value(self, value, dialect):
+        if getattr(dialect, "_personal_data_encrypted", True) is False:
+            return self._legacy_value(value)
         return None if value is None else decrypt(value, self.scope, self.searchable)
+
+    @staticmethod
+    def _legacy_value(value):
+        if value is not None and value.startswith(("pd1:s:", "pd1:r:")):
+            raise PersonalDataError("Encrypted personal data found in an unmigrated database; refusing plaintext mode")
+        return value

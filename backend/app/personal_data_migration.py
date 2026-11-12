@@ -1,5 +1,7 @@
 """Offline, transactional upgrade of legacy plaintext personal fields."""
 
+import logging
+
 from sqlalchemy import inspect, text
 
 from .database import Base
@@ -9,6 +11,39 @@ from .personal_data import EncryptedText, PersonalDataError, cipher, decrypt, en
 
 STATE_TABLE = "personal_data_encryption_state"
 CHECK_VALUE = "stockfolio-personal-data-v1"
+
+
+def configure_storage(conn) -> bool:
+    """Choose one storage mode per engine, never from whether a key is present."""
+    # Reset to fail-closed before validating, including a reused engine whose
+    # previous startup selected legacy mode.
+    conn.dialect._personal_data_encrypted = True
+    inspector = inspect(conn)
+    if inspector.has_table(STATE_TABLE):
+        require_ready(conn)
+        return True
+
+    existing = set(inspector.get_table_names())
+    for name, columns in protected_tables().items():
+        if name not in existing:
+            continue
+        present = {column["name"] for column in inspector.get_columns(name)}
+        for column in columns:
+            if column.name not in present:
+                continue
+            found = conn.scalar(text(
+                f'SELECT 1 FROM "{name}" WHERE "{column.name}" LIKE :searchable '
+                f'OR "{column.name}" LIKE :randomized LIMIT 1'
+            ), {"searchable": "pd1:s:%", "randomized": "pd1:r:%"})
+            if found is not None:
+                raise PersonalDataError("Encrypted personal data exists without its migration marker; restore the marker and key")
+
+    conn.dialect._personal_data_encrypted = False
+    logging.getLogger(__name__).warning(
+        "Personal-data encryption is not enabled: using the existing unmigrated database. "
+        "Provision PERSONAL_DATA_KEY and run the offline migration to enable encryption."
+    )
+    return False
 
 
 def protected_tables():
