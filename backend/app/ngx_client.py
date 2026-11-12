@@ -277,6 +277,7 @@ def normalize_stock(raw: dict[str, Any], source: str) -> dict[str, Any] | None:
         "ngx_id": ngx_id,
         "sector": _first(raw, ["Sector", "sector"]),
         "last_price": last_price,
+        "unit_price_field": field,
         "previous_close": previous_close,
         "open_price": open_price,
         "high_price": high_price,

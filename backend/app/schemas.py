@@ -130,9 +130,9 @@ class HoldingOut(BaseModel):
     quantity: float
     avg_purchase_price: float
     current_price: float | None = None
-    total_value: float
+    total_value: float | None
     total_cost: float
-    profit_loss: float
+    profit_loss: float | None
     profit_loss_percent: float | None = None
     notes: str | None = None
 

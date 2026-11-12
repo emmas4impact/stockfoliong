@@ -1362,9 +1362,9 @@ class Holding {
   final double quantity;
   final double avgPurchasePrice;
   final double? currentPrice;
-  final double totalValue;
+  final double? totalValue;
   final double totalCost;
-  final double profitLoss;
+  final double? profitLoss;
   final double? profitLossPercent;
   final String? notes;
 
@@ -1375,9 +1375,9 @@ class Holding {
       quantity: asDouble(json['quantity']) ?? 0,
       avgPurchasePrice: asDouble(json['avg_purchase_price']) ?? 0,
       currentPrice: asDouble(json['current_price']),
-      totalValue: asDouble(json['total_value']) ?? 0,
+      totalValue: asDouble(json['total_value']),
       totalCost: asDouble(json['total_cost']) ?? 0,
-      profitLoss: asDouble(json['profit_loss']) ?? 0,
+      profitLoss: asDouble(json['profit_loss']),
       profitLossPercent: asDouble(json['profit_loss_percent']),
       notes: json['notes'] as String?,
     );
@@ -1395,6 +1395,25 @@ class Holding {
       profitLoss: 0,
     );
   }
+}
+
+String portfolioAmount(double? value) =>
+    value == null ? 'Quote pending' : moneyFormat.format(value);
+
+String portfolioPercent(double? value) =>
+    value == null ? 'Not available' : '${value.toStringAsFixed(2)}%';
+
+class PortfolioTotals {
+  PortfolioTotals(List<Holding> holdings)
+      : invested = holdings.fold<double>(0, (sum, item) => sum + item.totalCost),
+        value = holdings.any((item) => item.totalValue == null)
+            ? null
+            : holdings.fold<double>(0, (sum, item) => sum + item.totalValue!);
+
+  final double invested;
+  final double? value;
+  double? get profit => value == null ? null : value! - invested;
+  double? get percent => profit == null || invested == 0 ? null : profit! * 100 / invested;
 }
 
 class StockDetailBundle {
@@ -4744,22 +4763,14 @@ class _HomeScreenState extends State<HomeScreen> {
         future: holdingsFuture,
         builder: (context, snapshot) {
           final holdings = snapshot.data ?? [];
-          final totalValue = holdings.fold<double>(
-            0,
-            (sum, item) => sum + item.totalValue,
-          );
-          final totalCost = holdings.fold<double>(
-            0,
-            (sum, item) => sum + item.totalCost,
-          );
-          final profitLoss = totalValue - totalCost;
-          final profitPercent = totalCost == 0
-              ? 0.0
-              : (profitLoss / totalCost) * 100;
+          final totals = PortfolioTotals(holdings);
+          final profitLoss = totals.profit;
+          final profitPercent = totals.percent;
           Holding? bestHolding;
           Holding? weakestHolding;
           for (final holding in holdings) {
-            final change = holding.profitLossPercent ?? 0;
+            final change = holding.profitLossPercent;
+            if (change == null) continue;
             if (bestHolding == null ||
                 change >
                     (bestHolding.profitLossPercent ??
@@ -4777,7 +4788,7 @@ class _HomeScreenState extends State<HomeScreen> {
             padding: const EdgeInsets.all(16),
             children: [
               _PortfolioOverviewHero(
-                totalValue: totalValue,
+                totalValue: totals.value,
                 profitLoss: profitLoss,
                 profitPercent: profitPercent,
                 holdingCount: holdings.length,
@@ -4807,9 +4818,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   MetricCard(
                     label: 'Unrealized return',
-                    value: '${profitPercent.toStringAsFixed(2)}%',
+                    value: portfolioPercent(profitPercent),
                     icon: Icons.payments,
-                    positive: profitLoss >= 0,
+                    positive: profitLoss == null ? null : profitLoss >= 0,
                   ),
                   MetricCard(
                     label: 'Best holding',
@@ -4824,7 +4835,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     value: weakestHolding == null
                         ? '-'
                         : '${weakestHolding.symbol} ${(weakestHolding.profitLossPercent ?? 0).toStringAsFixed(2)}%',
-                    icon: profitLoss >= 0
+                    icon: profitLoss == null || profitLoss >= 0
                         ? Icons.monitor_heart_outlined
                         : Icons.warning_amber_rounded,
                     positive: false,
@@ -5690,21 +5701,12 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
       future: future,
       builder: (context, snapshot) {
         final holdings = snapshot.data ?? [];
-        final totalValue = holdings.fold<double>(
-          0,
-          (sum, item) => sum + item.totalValue,
-        );
-        final totalCost = holdings.fold<double>(
-          0,
-          (sum, item) => sum + item.totalCost,
-        );
-        final profitLoss = totalValue - totalCost;
-        if (selectedHolding != null &&
-            !holdings.any(
-              (holding) => holding.symbol == selectedHolding!.symbol,
-            )) {
-          selectedHolding = null;
-          selectedDetailFuture = null;
+        final totals = PortfolioTotals(holdings);
+        final profitLoss = totals.profit;
+        if (selectedHolding != null && snapshot.hasData) {
+          final symbol = selectedHolding!.symbol;
+          selectedHolding = holdings.where((h) => h.symbol == symbol).firstOrNull;
+          if (selectedHolding == null) selectedDetailFuture = null;
         }
 
         return RefreshIndicator(
@@ -5720,25 +5722,25 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
                     label: 'Portfolio value',
                     value: widget.hideFinancialValues
                         ? '*****'
-                        : moneyFormat.format(totalValue),
+                        : portfolioAmount(totals.value),
                     icon: Icons.payments,
                   ),
                   MetricCard(
                     label: 'Amount invested',
                     value: widget.hideFinancialValues
                         ? '*****'
-                        : moneyFormat.format(totalCost),
+                        : moneyFormat.format(totals.invested),
                     icon: Icons.savings,
                   ),
                   MetricCard(
                     label: 'Profit / loss',
                     value: widget.hideFinancialValues
                         ? '*****'
-                        : moneyFormat.format(profitLoss),
-                    icon: profitLoss >= 0
+                        : portfolioAmount(profitLoss),
+                    icon: profitLoss == null || profitLoss >= 0
                         ? Icons.trending_up
                         : Icons.trending_down,
-                    positive: profitLoss >= 0,
+                    positive: profitLoss == null ? null : profitLoss >= 0,
                   ),
                   MetricCard(
                     label: widget.hideFinancialValues
@@ -5967,13 +5969,12 @@ class HoldingTile extends StatelessWidget {
                         ),
                         StockDetailValue(
                           label: 'Current value',
-                          value: moneyFormat.format(holding.totalValue),
+                          value: portfolioAmount(holding.totalValue),
                         ),
                         StockDetailValue(
                           label: 'P/L',
-                          value:
-                              '${holding.profitLossPercent?.toStringAsFixed(2) ?? '0.00'}%',
-                          positive: holding.profitLoss >= 0,
+                          value: portfolioPercent(holding.profitLossPercent),
+                          positive: holding.profitLoss == null ? null : holding.profitLoss! >= 0,
                         ),
                       ],
                     ),
@@ -6024,7 +6025,7 @@ class HoldingTile extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
                         Text(
-                          moneyFormat.format(holding.totalValue),
+                          portfolioAmount(holding.totalValue),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.titleMedium
@@ -6057,12 +6058,12 @@ class HoldingTile extends StatelessWidget {
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          '${holding.profitLossPercent?.toStringAsFixed(2) ?? '0.00'}%',
+                          portfolioPercent(holding.profitLossPercent),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.titleSmall
                               ?.copyWith(
-                                color: holding.profitLoss >= 0
+                                color: holding.profitLoss == null ? null : holding.profitLoss! >= 0
                                     ? Colors.green.shade700
                                     : Colors.red.shade700,
                                 fontWeight: FontWeight.w700,
@@ -6173,8 +6174,9 @@ class PortfolioHoldingDetail extends StatelessWidget {
         child: FutureBuilder<StockDetailBundle>(
           future: detailFuture,
           builder: (context, snapshot) {
-            final detail = snapshot.data;
+            final detail = snapshot.data?.stock.symbol == holding!.symbol ? snapshot.data : null;
             final stock = detail?.stock;
+            final pending = holding!.quantity > 0 && holding!.currentPrice == null;
             final points = detail?.history ?? [];
             final latest = points.isEmpty ? null : points.last;
             final marketSnapshot = detail?.marketSnapshot;
@@ -6223,7 +6225,9 @@ class PortfolioHoldingDetail extends StatelessWidget {
                       .toList(),
                 ),
                 const SizedBox(height: 12),
-                points.isEmpty
+                pending
+                    ? const Text('Waiting for a verified share price.')
+                    : points.isEmpty
                     ? const EmptyState(
                         icon: Icons.show_chart,
                         text: 'No chart data available yet.',
@@ -6258,28 +6262,26 @@ class PortfolioHoldingDetail extends StatelessWidget {
                     ),
                     StockDetailValue(
                       label: 'Current value',
-                      value: moneyFormat.format(holding!.totalValue),
+                      value: portfolioAmount(holding!.totalValue),
                     ),
                     StockDetailValue(
                       label: 'Unrealized P/L',
-                      value: moneyFormat.format(holding!.profitLoss),
-                      positive: holding!.profitLoss >= 0,
+                      value: portfolioAmount(holding!.profitLoss),
+                      positive: holding!.profitLoss == null ? null : holding!.profitLoss! >= 0,
                     ),
                     StockDetailValue(
                       label: 'Current',
-                      value: stock?.lastPrice == null
-                          ? 'Not available'
-                          : moneyFormat.format(stock!.lastPrice),
+                      value: portfolioAmount(holding!.quantity > 0 ? holding!.currentPrice : stock?.lastPrice),
                     ),
                     StockDetailValue(
                       label: 'Opening',
-                      value: latest == null
+                      value: pending || latest == null
                           ? 'Not available'
                           : moneyFormat.format(latest.open),
                     ),
                     StockDetailValue(
                       label: 'Closing',
-                      value: latest == null
+                      value: pending || latest == null
                           ? 'Not available'
                           : moneyFormat.format(latest.close),
                     ),
@@ -8091,9 +8093,9 @@ class _PortfolioOverviewHero extends StatelessWidget {
     required this.onToggleVisibility,
   });
 
-  final double totalValue;
-  final double profitLoss;
-  final double profitPercent;
+  final double? totalValue;
+  final double? profitLoss;
+  final double? profitPercent;
   final int holdingCount;
   final Holding? bestHolding;
   final Holding? weakestHolding;
@@ -8103,7 +8105,7 @@ class _PortfolioOverviewHero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final positive = profitLoss >= 0;
+    final positive = profitLoss == null || profitLoss! >= 0;
     final accent = positive
         ? (theme.brightness == Brightness.dark
               ? const Color(0xFF6AF0C1)
@@ -8178,7 +8180,7 @@ class _PortfolioOverviewHero extends StatelessWidget {
               ),
               Chip(
                 label: Text(
-                  '${profitPercent.toStringAsFixed(2)}%',
+                  portfolioPercent(profitPercent),
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w700,
@@ -8205,7 +8207,7 @@ class _PortfolioOverviewHero extends StatelessWidget {
           ),
           const SizedBox(height: 22),
           Text(
-            hideFinancialValues ? '*****' : moneyFormat.format(totalValue),
+            hideFinancialValues ? '*****' : portfolioAmount(totalValue),
             style: theme.textTheme.headlineMedium?.copyWith(
               fontWeight: FontWeight.w800,
               color: Colors.white,
@@ -8214,8 +8216,9 @@ class _PortfolioOverviewHero extends StatelessWidget {
           const SizedBox(height: 8),
           Text(
             hideFinancialValues
-                ? '***** unrealized ${positive ? 'gain' : 'loss'}'
-                : '${positive ? '+' : '-'}${moneyFormat.format(profitLoss.abs())} unrealized ${positive ? 'gain' : 'loss'}',
+                ? '*****'
+                : profitLoss == null ? 'Unrealized return pending'
+                : '${positive ? '+' : '-'}${moneyFormat.format(profitLoss!.abs())} unrealized ${positive ? 'gain' : 'loss'}',
             style: theme.textTheme.titleMedium?.copyWith(
               color: accent,
               fontWeight: FontWeight.w700,

@@ -645,6 +645,7 @@ def ensure_runtime_schema() -> None:
             text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS shares_outstanding NUMERIC(24, 2)")
         )
         conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS pe_ratio NUMERIC(14, 4)"))
+        conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS unit_price_field VARCHAR(32)"))
 
 
 @app.on_event("startup")

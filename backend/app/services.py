@@ -486,13 +486,18 @@ def upsert_daily_stock_snapshot(db: Session, stock: Stock) -> int:
 
 
 def holding_to_dict(holding: PortfolioHolding) -> dict:
-    current_price = float(holding.stock.last_price) if holding.stock and holding.stock.last_price is not None else None
+    stock = holding.stock
+    # Pre-fix Kobo rows may contain turnover; wait for a normalized price on resync.
+    usable = stock and stock.last_price is not None and stock.last_price > 0 and (
+        stock.source != "ngxpulse" or stock.unit_price_field is not None
+    )
+    current_price = float(stock.last_price) if usable else None
     quantity = float(holding.quantity)
     avg_price = float(holding.avg_purchase_price)
     total_cost = quantity * avg_price
-    total_value = quantity * (current_price or 0)
-    profit_loss = total_value - total_cost
-    profit_loss_percent = (profit_loss / total_cost * 100) if total_cost else None
+    total_value = quantity * current_price if current_price is not None else None
+    profit_loss = total_value - total_cost if total_value is not None else None
+    profit_loss_percent = (profit_loss / total_cost * 100) if profit_loss is not None and total_cost else None
 
     return {
         "stock_symbol": holding.stock_symbol,
@@ -519,6 +524,7 @@ def upsert_holding(db: Session, user: User, payload: HoldingUpsert) -> Portfolio
         stock.name = payload.manual_name
     if payload.manual_current_price is not None:
         stock.last_price = payload.manual_current_price
+        stock.unit_price_field = "manual"
         stock.source = "manual"
 
     holding = db.scalar(

@@ -48,6 +48,7 @@ class Stock(TimestampMixin, Base):
     ngx_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     sector: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
+    unit_price_field: Mapped[str | None] = mapped_column(String(32), nullable=True)
     previous_close: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     open_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     high_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
