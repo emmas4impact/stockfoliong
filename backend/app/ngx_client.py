@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from html import unescape
+import math
 import re
 from threading import Lock
 import time
@@ -330,6 +331,48 @@ def _fetch_all_stocks_from_ngxpulse() -> list[dict[str, Any]]:
         for item in results
         if isinstance(item, dict) and (stock := normalize_stock(item, "ngxpulse"))
     ]
+
+
+def fetch_kobo_fundamentals() -> dict[str, dict]:
+    """One authenticated bulk request. Do not put the API key in a URL or sync log."""
+    try:
+        response = _get_session().get(
+            "https://koboterminal.com/api/ngxdata/fundamentals",
+            headers=_ngxpulse_headers(), timeout=20, allow_redirects=False,
+        )
+    except requests.RequestException:
+        raise NgxFetchError("Kobo fundamentals request could not reach the provider.") from None
+    if response.status_code != 200:
+        raise NgxFetchError(f"Kobo fundamentals returned HTTP {response.status_code}.")
+    try:
+        payload = response.json()
+    except ValueError:
+        raise NgxFetchError("Kobo fundamentals did not return JSON.") from None
+    if not isinstance(payload, dict) or payload.get("success") is not True or not isinstance(payload.get("fundamentals"), list):
+        raise NgxFetchError("Kobo fundamentals response did not contain a successful fundamentals list.")
+
+    by_symbol = {}
+    for row in payload["fundamentals"]:
+        if not isinstance(row, dict) or not isinstance(row.get("symbol"), str):
+            continue
+        symbol = row["symbol"].strip().upper()
+        if not symbol:
+            continue
+        metrics = {}
+        for field in ("pe_ratio", "forward_pe", "eps", "dividend_per_share", "dividend_yield",
+                      "beta", "52w_change", "roa", "roe", "pb_ratio", "debt_equity",
+                      "profit_margin", "gross_margin"):
+            raw = row.get(field)
+            value = _number(raw) if isinstance(raw, (str, int, float)) and not isinstance(raw, bool) else None
+            metrics[field] = value if value is not None and math.isfinite(value) else None
+        metrics["updated_at"] = row.get("updated_at") if isinstance(row.get("updated_at"), str) else None
+        if isinstance(row.get("extra"), dict):
+            metrics["extra"] = {
+                k: v for k, v in row["extra"].items()
+                if v is None or isinstance(v, (int, str)) or (isinstance(v, float) and math.isfinite(v))
+            }
+        by_symbol[symbol] = metrics
+    return by_symbol
 
 
 def _fetch_all_stocks_from_doclib() -> list[dict[str, Any]]:

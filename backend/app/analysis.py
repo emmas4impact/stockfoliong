@@ -47,6 +47,11 @@ def record_observation(db, stock_data, observed_at=None):
         "reporting_period": None,
         "published_at": None,
     }
+    if "fundamentals" in stock_data:
+        inputs["fundamentals"] = stock_data["fundamentals"]
+        inputs["fundamentals_source"] = "kobo_fundamentals"
+        if stock_data["fundamentals"]["pe_ratio"] is not None:
+            inputs["pe_basis"] = "trailing"
     previous = db.scalar(select(FundamentalObservation).where(
         FundamentalObservation.stock_symbol == stock_data["symbol"],
     ).order_by(FundamentalObservation.observed_at.desc(), FundamentalObservation.id.desc()).limit(1))
@@ -112,10 +117,10 @@ def score_observation(target, universe, now=None):
                          "pe_ratio": row.inputs["pe_ratio"]} for row in sorted(peers, key=lambda row: row.stock_symbol)],
         "coverage": {"scored_components": int(score is not None), "total_components": 5},
         "reasons": reasons,
-        "limitations": ["P/E basis and financial reporting dates are not supplied by the current adapter.",
+        "limitations": ["Financial reporting dates are unknown. Stock-list P/E has an unspecified basis.",
                         "Observed date is when we received data, not its publication date.",
                         "Relative P/E is an experimental comparison, not a forecast or probability of profit.",
-                        "Growth, dividends, balance-sheet metrics and P/B are unavailable to this model."],
+                        "The valuation score uses only P/E; other fundamentals are not scored."],
         "disclaimer": DISCLAIMER,
     }
 

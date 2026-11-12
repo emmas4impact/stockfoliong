@@ -19,8 +19,18 @@ carried-forward Stock fields can contaminate it. Identical observations on the
 same UTC day are skipped; changes and subsequent days are retained. No retention
 deletion is configured for either table.
 
-Observations include price, P/E, sector, source and receipt time. Reporting period,
-publication time and P/E basis are explicitly unknown in the current adapter.
+When the live stock list comes from NGXPulse, each sync also makes one bulk GET to
+`https://koboterminal.com/api/ngxdata/fundamentals`, using the existing
+`NGXPULSE_API_KEY` in the request header. It joins by symbol, not list position.
+A match stores metrics, provider `updated_at` and scalar `extra` fields in
+`inputs.fundamentals`. A numeric trailing P/E from that endpoint takes precedence
+over stock-list P/E. Forward P/E is never substituted. Unmatched quotes still sync;
+a failed fundamentals request is logged and does not stop price ingestion.
+The sync result message reports matches or the provider error. No database migration
+or Flutter rebuild is required for this enrichment.
+
+Observations include price, P/E, sector, source and receipt time. Reporting period
+and publication time are unknown; stock-list P/E has an unspecified basis.
 Receipt time does not prove when earnings were published or that they are fresh.
 Old Stock rows are deliberately not backfilled as historical fundamentals.
 
@@ -56,6 +66,27 @@ The tests use isolated SQLite tables and cover sector/source filtering, stale
 observations, missing/negative P/E, insufficient peers, repeated ingestion and
 immutable analysis storage. Production PostgreSQL deployment still requires a
 smoke check after migration/startup and a successful provider sync.
+
+### Measure coverage on the hosted API
+
+From the repository root, run the read-only check with a normal app account:
+
+```sh
+python3 scripts/check_analysis_coverage.py https://ngx-api.up.railway.app
+```
+
+Enter credentials at the local prompts, not in chat or the command line. The
+script checks each listed symbol sequentially against the authenticated API;
+it requires no redeploy. It reports numeric valuations (including zero) as a
+percentage of **all listed stocks**, separates missing observations from missing
+scores, and checks saved history for up to three sectors. Reasons can overlap.
+This is a rolling read, not a transactionally consistent snapshot during a sync.
+HTTP failures other than the known missing-observation response abort the check.
+
+Only to deliberately run a write on the specified backend, add `--sync` and
+log in with an admin account. This requests one stock sync without chart-history
+backfill and rejects cached or seeded results. Otherwise the existing scheduled
+sync is sufficient. Assess coverage by sector before exposing the score in Flutter.
 
 ## Next milestone
 

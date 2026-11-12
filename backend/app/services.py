@@ -10,6 +10,7 @@ from .ngx_client import (
     NgxFetchError,
     clear_runtime_caches,
     fetch_all_stocks_from_ngx,
+    fetch_kobo_fundamentals,
     fetch_company_news_cached,
     fetch_disclosures_cached,
     fetch_dividend_history_cached,
@@ -115,6 +116,28 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
             db.commit()
             return "database_cache", 0, 0, "warning", message
 
+    enrichment_message = None
+    if source == "ngxpulse":
+        try:
+            fundamentals = fetch_kobo_fundamentals()
+        except NgxFetchError as exc:
+            enrichment_message = f"{exc} Continuing with stock-list data."
+            record_sync_log(db, status="warning", source="kobo_fundamentals", message=enrichment_message)
+        else:
+            matches = 0
+            trailing_pe_count = 0
+            for quote in stocks:
+                metrics = fundamentals.get(quote["symbol"])
+                if metrics is None:
+                    continue
+                matches += 1
+                quote["fundamentals"] = metrics
+                if metrics["pe_ratio"] is not None:
+                    quote["pe_ratio"] = metrics["pe_ratio"]
+                    trailing_pe_count += 1
+            enrichment_message = (f"Kobo fundamentals matched {matches}/{len(stocks)} stocks; "
+                                  f"{trailing_pe_count} supplied a numeric trailing P/E.")
+
     history_count = 0
     for stock_data in stocks:
         stock = upsert_stock(db, stock_data)
@@ -135,6 +158,7 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
         source=source,
         stocks_upserted=len(stocks),
         history_rows_upserted=history_count,
+        message=enrichment_message,
     )
     if settings.ngxpulse_enabled:
         try:
@@ -155,7 +179,7 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
             refresh_market_status(db)
     db.commit()
     clear_runtime_caches()
-    return source, len(stocks), history_count, "success", None
+    return source, len(stocks), history_count, "success", enrichment_message
 
 
 def sync_status(db: Session) -> dict:
