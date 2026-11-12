@@ -20,6 +20,8 @@ import 'profile_image_picker_stub.dart'
 import 'stock_logo_assets.dart';
 import 'sector_valuation.dart';
 
+part 'portfolio_view.dart';
+
 final apiBaseUrl = normalizeApiBaseUrl(configuredApiBaseUrl());
 const _themeModePreferenceKey = 'theme_mode';
 const _webSessionDeadlineKey = 'web_session_deadline_ms';
@@ -5695,6 +5697,24 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
     });
   }
 
+  Future<void> openMobileDetail(Holding holding) async {
+    var range = StockHistoryRange.oneYear;
+    var detail = widget.api.stockDetail(holding.symbol, range: range.queryValue);
+    await showModalBottomSheet<void>(
+      context: context, isScrollControlled: true, useSafeArea: true, showDragHandle: true,
+      builder: (_) => StatefulBuilder(builder: (context, update) => SizedBox(
+        height: MediaQuery.sizeOf(context).height * .8,
+        child: SingleChildScrollView(child: PortfolioHoldingDetail(
+          api: widget.api, holding: holding, detailFuture: detail, selectedRange: range,
+          onRangeSelected: (next) => update(() {
+            range = next;
+            detail = widget.api.stockDetail(holding.symbol, range: next.queryValue);
+          }),
+        )),
+      )),
+    );
+  }
+
   Future<void> addHolding([Holding? holding]) async {
     final result = await showDialog<HoldingInput>(
       context: context,
@@ -5739,7 +5759,6 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
         }
         final holdings = snapshot.data ?? [];
         final totals = PortfolioTotals(holdings);
-        final profitLoss = totals.profit;
         if (selectedHolding != null && snapshot.hasData) {
           final symbol = selectedHolding!.symbol;
           selectedHolding = holdings.where((h) => h.symbol == symbol).firstOrNull;
@@ -5751,58 +5770,9 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: [
-                  MetricCard(
-                    label: 'Portfolio value',
-                    value: widget.hideFinancialValues
-                        ? '*****'
-                        : portfolioAmount(totals.value),
-                    icon: Icons.payments,
-                  ),
-                  MetricCard(
-                    label: 'Amount invested',
-                    value: widget.hideFinancialValues
-                        ? '*****'
-                        : moneyFormat.format(totals.invested),
-                    icon: Icons.savings,
-                  ),
-                  MetricCard(
-                    label: 'Profit / loss',
-                    value: widget.hideFinancialValues
-                        ? '*****'
-                        : portfolioAmount(profitLoss),
-                    icon: profitLoss == null || profitLoss >= 0
-                        ? Icons.trending_up
-                        : Icons.trending_down,
-                    positive: profitLoss == null ? null : profitLoss >= 0,
-                  ),
-                  MetricCard(
-                    label: widget.hideFinancialValues
-                        ? 'Reveal totals'
-                        : 'Hide totals',
-                    value: widget.hideFinancialValues
-                        ? 'Tap to show'
-                        : 'Tap to hide',
-                    icon: widget.hideFinancialValues
-                        ? Icons.visibility_outlined
-                        : Icons.visibility_off_outlined,
-                    onTap: widget.onToggleFinancialPrivacy,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: FilledButton.icon(
-                  onPressed: () => addHolding(),
-                  icon: const Icon(Icons.add),
-                  label: const Text('Add holding'),
-                ),
-              ),
-              const SizedBox(height: 16),
+              PortfolioSummaryStrip(totals: totals, hidden: widget.hideFinancialValues,
+                  togglePrivacy: widget.onToggleFinancialPrivacy),
+              const SizedBox(height: 24),
               if (snapshot.connectionState == ConnectionState.waiting)
                 const Center(
                   child: Padding(
@@ -5811,49 +5781,39 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
                   ),
                 )
               else if (holdings.isEmpty)
-                const EmptyState(
-                  icon: Icons.account_balance_wallet_outlined,
-                  text: 'No holdings yet.',
-                )
+                HoldingsLedger(holdings: holdings, selectedSymbol: null, onSelect: selectHolding,
+                    onEdit: addHolding, onDelete: remove, onAdd: () => addHolding())
               else
                 LayoutBuilder(
                   builder: (context, constraints) {
                     final selected = selectedHolding;
-                    final detail = PortfolioHoldingDetail(
-                      api: widget.api,
-                      holding: selected,
-                      detailFuture: selectedDetailFuture,
-                      selectedRange: selectedDetailRange,
-                      onRangeSelected: selectDetailRange,
+                    final wide = constraints.maxWidth >= 960;
+                    final list = HoldingsLedger(
+                      holdings: holdings, selectedSymbol: wide ? selected?.symbol : null,
+                      onSelect: wide ? selectHolding : openMobileDetail,
+                      onEdit: addHolding, onDelete: remove, onAdd: () => addHolding(),
                     );
-                    final holdingCards = holdings
-                        .map(
-                          (holding) => HoldingTile(
-                            holding: holding,
-                            selected: holding.symbol == selected?.symbol,
-                            onTap: () => selectHolding(holding),
-                            onEdit: () => addHolding(holding),
-                            onDelete: () => remove(holding.symbol),
+                    final allocation = PortfolioAllocation(holdings: holdings);
+                    if (!wide) return Column(children: [list, const SizedBox(height: 20), allocation]);
+                    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Expanded(flex: 7, child: list),
+                      const SizedBox(width: 24),
+                      Expanded(flex: 4, child: selected == null ? allocation : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          TextButton.icon(
+                            icon: const Icon(Icons.arrow_back, size: 18),
+                            label: const Text('Allocation'),
+                            onPressed: () => setState(() {
+                              selectedHolding = null;
+                              selectedDetailFuture = null;
+                            }),
                           ),
-                        )
-                        .toList();
-                    if (constraints.maxWidth >= 980) {
-                      return Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(child: Column(children: holdingCards)),
-                          const SizedBox(width: 16),
-                          SizedBox(width: 440, child: detail),
+                          PortfolioHoldingDetail(api: widget.api, holding: selected,
+                            detailFuture: selectedDetailFuture, selectedRange: selectedDetailRange,
+                            onRangeSelected: selectDetailRange),
                         ],
-                      );
-                    }
-                    return Column(
-                      children: [
-                        detail,
-                        const SizedBox(height: 12),
-                        ...holdingCards,
-                      ],
-                    );
+                      )),
+                    ]);
                   },
                 ),
             ],
@@ -5865,10 +5825,11 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
 }
 
 class CompanyLogo extends StatelessWidget {
-  const CompanyLogo({super.key, required this.symbol, this.size = 40});
+  const CompanyLogo({super.key, required this.symbol, this.size = 40, this.useInitials = false});
 
   final String symbol;
   final double size;
+  final bool useInitials;
 
   @override
   Widget build(BuildContext context) {
@@ -5881,7 +5842,10 @@ class CompanyLogo extends StatelessWidget {
         shape: BoxShape.circle,
       ),
       alignment: Alignment.center,
-      child: Icon(
+      child: useInitials && symbol.isNotEmpty ? Text(
+        symbol.substring(0, min(2, symbol.length)).toUpperCase(),
+        style: TextStyle(color: colorScheme.onPrimaryContainer, fontSize: size * .35, fontWeight: FontWeight.w700),
+      ) : Icon(
         Icons.business_outlined,
         size: size * 0.55,
         color: colorScheme.onPrimaryContainer,
@@ -5921,214 +5885,6 @@ class CompanyLogo extends StatelessWidget {
   }
 }
 
-class HoldingTile extends StatelessWidget {
-  const HoldingTile({
-    super.key,
-    required this.holding,
-    required this.selected,
-    required this.onTap,
-    required this.onEdit,
-    required this.onDelete,
-  });
-
-  final Holding holding;
-  final bool selected;
-  final VoidCallback onTap;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Card(
-      color: selected
-          ? colorScheme.primaryContainer.withValues(alpha: 0.35)
-          : null,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          if (constraints.maxWidth < 620) {
-            return InkWell(
-              onTap: onTap,
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        CompanyLogo(symbol: holding.symbol),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                holding.symbol,
-                                style: Theme.of(context).textTheme.titleMedium,
-                              ),
-                              Text(
-                                holding.name ?? holding.symbol,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: 'Edit',
-                          onPressed: onEdit,
-                          icon: const Icon(Icons.edit_outlined),
-                        ),
-                        IconButton(
-                          tooltip: 'Delete',
-                          onPressed: onDelete,
-                          icon: const Icon(Icons.delete_outline),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 18,
-                      runSpacing: 8,
-                      children: [
-                        StockDetailValue(
-                          label: 'Shares',
-                          value: holding.quantity.toStringAsFixed(2),
-                        ),
-                        StockDetailValue(
-                          label: 'Purchase price',
-                          value: moneyFormat.format(holding.avgPurchasePrice),
-                        ),
-                        StockDetailValue(
-                          label: 'Invested',
-                          value: moneyFormat.format(holding.totalCost),
-                        ),
-                        StockDetailValue(
-                          label: 'Current value',
-                          value: portfolioAmount(holding.totalValue),
-                        ),
-                        StockDetailValue(
-                          label: 'P/L',
-                          value: portfolioPercent(holding.profitLossPercent),
-                          positive: holding.profitLoss == null ? null : holding.profitLoss! >= 0,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-
-          final desktopValueWidth = constraints.maxWidth >= 1500
-              ? 340.0
-              : constraints.maxWidth >= 1250
-              ? 300.0
-              : 260.0;
-
-          return InkWell(
-            onTap: onTap,
-            borderRadius: BorderRadius.circular(24),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-              child: Row(
-                children: [
-                  CompanyLogo(symbol: holding.symbol, size: 46),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          holding.symbol,
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${holding.name ?? holding.symbol} - ${holding.quantity.toStringAsFixed(2)} shares',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  SizedBox(
-                    width: desktopValueWidth,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          portfolioAmount(holding.totalValue),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Invested ${moneyFormat.format(holding.totalCost)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.right,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
-                              ),
-                        ),
-                        Text(
-                          'Buy ${moneyFormat.format(holding.avgPurchasePrice)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.right,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
-                              ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          portfolioPercent(holding.profitLossPercent),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleSmall
-                              ?.copyWith(
-                                color: holding.profitLoss == null ? null : holding.profitLoss! >= 0
-                                    ? Colors.green.shade700
-                                    : Colors.red.shade700,
-                                fontWeight: FontWeight.w700,
-                              ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  IconButton(
-                    tooltip: 'Edit',
-                    onPressed: onEdit,
-                    icon: const Icon(Icons.edit_outlined),
-                  ),
-                  IconButton(
-                    tooltip: 'Delete',
-                    onPressed: onDelete,
-                    icon: const Icon(Icons.delete_outline),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
 
 class StockDetailValue extends StatelessWidget {
   const StockDetailValue({
