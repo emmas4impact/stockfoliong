@@ -20,6 +20,8 @@ import 'profile_image_picker_stub.dart'
 import 'stock_logo_assets.dart';
 import 'sector_valuation.dart';
 import 'financials.dart';
+import 'biometric_session.dart';
+import 'biometric_widgets.dart';
 
 part 'portfolio_view.dart';
 part 'market_view.dart';
@@ -346,16 +348,19 @@ Future<void> main() async {
 }
 
 class NgxPortfolioApp extends StatefulWidget {
-  const NgxPortfolioApp({super.key});
+  const NgxPortfolioApp({super.key, this.api});
+  final ApiClient? api;
 
   @override
   State<NgxPortfolioApp> createState() => _NgxPortfolioAppState();
 }
 
-class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
-  final ApiClient api = ApiClient(apiBaseUrl);
+class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingObserver {
+  late final ApiClient api = widget.api ?? ApiClient(apiBaseUrl);
   bool loading = true;
   bool authenticated = false;
+  bool biometricLocked = false;
+  final navigatorKey = GlobalKey<NavigatorState>();
   late String? emailVerificationToken;
   late String? passwordResetToken;
   ThemeMode themeMode = ThemeMode.system;
@@ -363,6 +368,7 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     emailVerificationToken = Uri.base.queryParameters['verify_email_token'];
     passwordResetToken = Uri.base.queryParameters['reset_password_token'];
     _loadToken();
@@ -370,10 +376,12 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
 
   Future<void> _loadToken() async {
     final prefs = await SharedPreferences.getInstance();
-    await api.restoreToken();
+    try { await api.restoreToken(); } catch (_) { /* Fail closed; password sign-in remains available. */ }
     final savedThemeMode = prefs.getString(_themeModePreferenceKey);
+    if (!mounted) return;
     setState(() {
       authenticated = api.hasToken;
+      biometricLocked = api.biometricSession.enabled;
       themeMode = switch (savedThemeMode) {
         'light' => ThemeMode.light,
         'dark' => ThemeMode.dark,
@@ -396,15 +404,40 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
   }
 
   void _signedIn() {
-    setState(() => authenticated = true);
+    setState(() { authenticated = true; biometricLocked = false; });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed && authenticated &&
+        api.biometricSession.enabled && !api.biometricSession.prompting && !biometricLocked) {
+      setState(() => biometricLocked = true);
+    }
+  }
+
+  Future<void> _unlockBiometric() async {
+    await api.unlockBiometricSession();
+    if (!mounted || WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
+    setState(() { authenticated = true; biometricLocked = false; });
+  }
+
+  Future<void> _usePassword() async {
+    await api.clearToken();
+    navigatorKey.currentState?.popUntil((route) => route.isFirst);
+    if (mounted) setState(() { authenticated = false; biometricLocked = false; });
   }
 
   Future<void> _signOut() async {
-    await PushNotifications.instance.unregister(
+    try { await PushNotifications.instance.unregister(
       removeToken: api.unregisterPushToken,
-    );
-    await api.clearToken();
-    setState(() => authenticated = false);
+    ).timeout(const Duration(seconds: 5)); } catch (_) { /* Local sign-out must work offline. */ }
+    await _usePassword();
   }
 
   @override
@@ -439,6 +472,13 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
         );
 
     return MaterialApp(
+      navigatorKey: navigatorKey,
+      builder: (context, child) => Stack(children: [
+        Offstage(offstage: biometricLocked, child: child),
+        if (biometricLocked) Positioned.fill(child: BiometricUnlockScreen(
+          onUnlock: _unlockBiometric, onPassword: _usePassword,
+        )),
+      ]),
       debugShowCheckedModeBanner: false,
       title: 'Stockfolio',
       themeMode: themeMode,
@@ -623,17 +663,22 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
 }
 
 class ApiClient {
-  ApiClient(this.baseUrl);
+  ApiClient(this.baseUrl, {BiometricSession? biometricSession, http.Client? client})
+      : biometricSession = biometricSession ?? BiometricSession(baseUrl),
+        _client = client ?? http.Client();
 
   final String baseUrl;
-  final http.Client _client = http.Client();
+  final http.Client _client;
+  final BiometricSession biometricSession;
   String? _token;
+  int _sessionRevision = 0;
 
   bool get hasToken => _token != null && _token!.isNotEmpty;
 
   Future<void> restoreToken() async {
     final prefs = await SharedPreferences.getInstance();
-    _token = prefs.getString('access_token');
+    _token = biometricSession.supported
+        ? await biometricSession.restore() : prefs.getString('access_token');
     if (kIsWeb &&
         _token != null &&
         prefs.getInt(_webSessionDeadlineKey) == null) {
@@ -642,6 +687,9 @@ class ApiClient {
   }
 
   Future<void> clearToken() async {
+    _sessionRevision++;
+    _token = null;
+    if (biometricSession.supported) await biometricSession.clear();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('access_token');
     await prefs.remove(_webSessionDeadlineKey);
@@ -650,10 +698,48 @@ class ApiClient {
   }
 
   Future<void> _saveToken(String token) async {
+    _sessionRevision++;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('access_token', token);
+    if (biometricSession.supported) {
+      await biometricSession.savePasswordSession(token);
+    } else {
+      await prefs.setString('access_token', token);
+    }
     if (kIsWeb) {
       await _startWebSession(prefs);
+    }
+    _token = token;
+  }
+
+  Future<void> setBiometricUnlock(bool enabled) async {
+    if (_token == null) throw const SessionUnlockException('Sign in with your password first.');
+    if (enabled) { await biometricSession.enable(_token!); }
+    else { await biometricSession.disable(_token!); }
+  }
+
+  Future<void> unlockBiometricSession() async {
+    final revision = _sessionRevision;
+    final token = await biometricSession.unlock();
+    if (token == null || token.isEmpty) {
+      await clearToken();
+      throw const SessionUnlockException('Your saved session is unavailable. Please use your password.');
+    }
+    late http.Response response;
+    try {
+      response = await _client.get(_uri('/me'),
+        headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 15));
+    } catch (_) {
+      throw const SessionUnlockException('Could not connect. Please try again when you are online.');
+    }
+    if (revision != _sessionRevision || !biometricSession.enabled) {
+      throw const SessionUnlockException('This session has changed. Please sign in again.');
+    }
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      await clearToken();
+      throw const SessionUnlockException('Your session has expired. Please sign in with your password.');
+    }
+    if (response.statusCode != 200) {
+      throw const SessionUnlockException('Could not verify your session. Please try again when connected.');
     }
     _token = token;
   }
@@ -4940,6 +5026,12 @@ class _AccountScreenState extends State<AccountScreen> {
                 ),
               ],
             ),
+            if (widget.api.biometricSession.supported) ...[
+              const SizedBox(height: 20),
+              const Divider(),
+              BiometricSettingsTile(session: widget.api.biometricSession,
+                onChanged: widget.api.setBiometricUnlock),
+            ],
           ],
         );
       },
