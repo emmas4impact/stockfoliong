@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS stocks (
     ngx_id VARCHAR(64),
     sector VARCHAR(128),
     last_price NUMERIC(18, 4),
+    unit_price_field VARCHAR(32),
     previous_close NUMERIC(18, 4),
     open_price NUMERIC(18, 4),
     high_price NUMERIC(18, 4),

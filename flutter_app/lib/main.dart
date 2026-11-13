@@ -18,12 +18,20 @@ import 'push_notifications.dart';
 import 'profile_image_picker_stub.dart'
     if (dart.library.html) 'profile_image_picker_web.dart';
 import 'stock_logo_assets.dart';
+import 'sector_valuation.dart';
+import 'financials.dart';
+import 'biometric_session.dart';
+import 'biometric_widgets.dart';
+
+part 'portfolio_view.dart';
+part 'market_view.dart';
 
 final apiBaseUrl = normalizeApiBaseUrl(configuredApiBaseUrl());
 const _themeModePreferenceKey = 'theme_mode';
 const _webSessionDeadlineKey = 'web_session_deadline_ms';
 const _webSessionExtendedKey = 'web_session_extended';
 const _financialPrivacyPreferenceKey = 'financial_privacy_hidden';
+const _chartTypePreferenceKey = 'preferred_chart_type';
 const _seedColor = Color(0xFF00A86B);
 const _gainColor = Color(0xFF00B67A);
 const _lossColor = Color(0xFFFF5A7A);
@@ -31,6 +39,15 @@ const _darkScaffold = Color(0xFF0B1215);
 const _darkSurface = Color(0xFF101A1E);
 const _darkSurfaceAlt = Color(0xFF142126);
 const _lightScaffold = Color(0xFFEDF2F7);
+const _marketIdeasFallbackDisclaimer =
+    'Stockfolio NG highlights data-driven watchlist ideas only. '
+    'It is not a financial adviser app. Contact your broker for detailed analysis.';
+
+final ValueNotifier<int> marketDataRefreshSignal = ValueNotifier<int>(0);
+
+void notifyMarketDataRefreshed() {
+  marketDataRefreshSignal.value++;
+}
 
 String stockLogoUrl(String symbol) =>
     '$apiBaseUrl/public/stocks/${Uri.encodeComponent(symbol)}/logo';
@@ -331,16 +348,19 @@ Future<void> main() async {
 }
 
 class NgxPortfolioApp extends StatefulWidget {
-  const NgxPortfolioApp({super.key});
+  const NgxPortfolioApp({super.key, this.api});
+  final ApiClient? api;
 
   @override
   State<NgxPortfolioApp> createState() => _NgxPortfolioAppState();
 }
 
-class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
-  final ApiClient api = ApiClient(apiBaseUrl);
+class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingObserver {
+  late final ApiClient api = widget.api ?? ApiClient(apiBaseUrl);
   bool loading = true;
   bool authenticated = false;
+  bool biometricLocked = false;
+  final navigatorKey = GlobalKey<NavigatorState>();
   late String? emailVerificationToken;
   late String? passwordResetToken;
   ThemeMode themeMode = ThemeMode.system;
@@ -348,6 +368,7 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     emailVerificationToken = Uri.base.queryParameters['verify_email_token'];
     passwordResetToken = Uri.base.queryParameters['reset_password_token'];
     _loadToken();
@@ -355,10 +376,12 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
 
   Future<void> _loadToken() async {
     final prefs = await SharedPreferences.getInstance();
-    await api.restoreToken();
+    try { await api.restoreToken(); } catch (_) { /* Fail closed; password sign-in remains available. */ }
     final savedThemeMode = prefs.getString(_themeModePreferenceKey);
+    if (!mounted) return;
     setState(() {
       authenticated = api.hasToken;
+      biometricLocked = api.biometricSession.enabled;
       themeMode = switch (savedThemeMode) {
         'light' => ThemeMode.light,
         'dark' => ThemeMode.dark,
@@ -381,15 +404,40 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
   }
 
   void _signedIn() {
-    setState(() => authenticated = true);
+    setState(() { authenticated = true; biometricLocked = false; });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed && authenticated &&
+        api.biometricSession.enabled && !api.biometricSession.prompting && !biometricLocked) {
+      setState(() => biometricLocked = true);
+    }
+  }
+
+  Future<void> _unlockBiometric() async {
+    await api.unlockBiometricSession();
+    if (!mounted || WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
+    setState(() { authenticated = true; biometricLocked = false; });
+  }
+
+  Future<void> _usePassword() async {
+    await api.clearToken();
+    navigatorKey.currentState?.popUntil((route) => route.isFirst);
+    if (mounted) setState(() { authenticated = false; biometricLocked = false; });
   }
 
   Future<void> _signOut() async {
-    await PushNotifications.instance.unregister(
+    try { await PushNotifications.instance.unregister(
       removeToken: api.unregisterPushToken,
-    );
-    await api.clearToken();
-    setState(() => authenticated = false);
+    ).timeout(const Duration(seconds: 5)); } catch (_) { /* Local sign-out must work offline. */ }
+    await _usePassword();
   }
 
   @override
@@ -424,6 +472,13 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
         );
 
     return MaterialApp(
+      navigatorKey: navigatorKey,
+      builder: (context, child) => Stack(children: [
+        Offstage(offstage: biometricLocked, child: child),
+        if (biometricLocked) Positioned.fill(child: BiometricUnlockScreen(
+          onUnlock: _unlockBiometric, onPassword: _usePassword,
+        )),
+      ]),
       debugShowCheckedModeBanner: false,
       title: 'Stockfolio',
       themeMode: themeMode,
@@ -472,23 +527,23 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
           filled: true,
           fillColor: Colors.white,
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: BorderSide.none,
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFFD6E5E2)),
           ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: _seedColor, width: 1.5),
           ),
           errorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFFDC2626)),
           ),
           focusedErrorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFFDC2626), width: 1.5),
           ),
         ),
@@ -497,7 +552,7 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
           color: Color(0xFFFFFFFF),
           surfaceTintColor: Colors.transparent,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(16)),
+            borderRadius: BorderRadius.all(Radius.circular(8)),
             side: BorderSide(color: Color(0xFFE2E8F0)),
           ),
         ),
@@ -548,30 +603,30 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
           filled: true,
           fillColor: _darkSurfaceAlt,
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: BorderSide.none,
           ),
           enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFF26363C)),
           ),
           focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFF58C1A0), width: 1.5),
           ),
           errorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFFF87171)),
           ),
           focusedErrorBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(8),
             borderSide: const BorderSide(color: Color(0xFFF87171), width: 1.5),
           ),
         ),
         cardTheme: const CardThemeData(
           elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.all(Radius.circular(24)),
+            borderRadius: BorderRadius.all(Radius.circular(8)),
             side: BorderSide(color: Color(0xFF203138)),
           ),
         ),
@@ -608,17 +663,22 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> {
 }
 
 class ApiClient {
-  ApiClient(this.baseUrl);
+  ApiClient(this.baseUrl, {BiometricSession? biometricSession, http.Client? client})
+      : biometricSession = biometricSession ?? BiometricSession(baseUrl),
+        _client = client ?? http.Client();
 
   final String baseUrl;
-  final http.Client _client = http.Client();
+  final http.Client _client;
+  final BiometricSession biometricSession;
   String? _token;
+  int _sessionRevision = 0;
 
   bool get hasToken => _token != null && _token!.isNotEmpty;
 
   Future<void> restoreToken() async {
     final prefs = await SharedPreferences.getInstance();
-    _token = prefs.getString('access_token');
+    _token = biometricSession.supported
+        ? await biometricSession.restore() : prefs.getString('access_token');
     if (kIsWeb &&
         _token != null &&
         prefs.getInt(_webSessionDeadlineKey) == null) {
@@ -627,6 +687,9 @@ class ApiClient {
   }
 
   Future<void> clearToken() async {
+    _sessionRevision++;
+    _token = null;
+    if (biometricSession.supported) await biometricSession.clear();
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('access_token');
     await prefs.remove(_webSessionDeadlineKey);
@@ -635,10 +698,48 @@ class ApiClient {
   }
 
   Future<void> _saveToken(String token) async {
+    _sessionRevision++;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('access_token', token);
+    if (biometricSession.supported) {
+      await biometricSession.savePasswordSession(token);
+    } else {
+      await prefs.setString('access_token', token);
+    }
     if (kIsWeb) {
       await _startWebSession(prefs);
+    }
+    _token = token;
+  }
+
+  Future<void> setBiometricUnlock(bool enabled) async {
+    if (_token == null) throw const SessionUnlockException('Sign in with your password first.');
+    if (enabled) { await biometricSession.enable(_token!); }
+    else { await biometricSession.disable(_token!); }
+  }
+
+  Future<void> unlockBiometricSession() async {
+    final revision = _sessionRevision;
+    final token = await biometricSession.unlock();
+    if (token == null || token.isEmpty) {
+      await clearToken();
+      throw const SessionUnlockException('Your saved session is unavailable. Please use your password.');
+    }
+    late http.Response response;
+    try {
+      response = await _client.get(_uri('/me'),
+        headers: {'Authorization': 'Bearer $token'}).timeout(const Duration(seconds: 15));
+    } catch (_) {
+      throw const SessionUnlockException('Could not connect. Please try again when you are online.');
+    }
+    if (revision != _sessionRevision || !biometricSession.enabled) {
+      throw const SessionUnlockException('This session has changed. Please sign in again.');
+    }
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      await clearToken();
+      throw const SessionUnlockException('Your session has expired. Please sign in with your password.');
+    }
+    if (response.statusCode != 200) {
+      throw const SessionUnlockException('Could not verify your session. Please try again when connected.');
     }
     _token = token;
   }
@@ -937,6 +1038,24 @@ class ApiClient {
         .toList();
   }
 
+  Future<SectorValuation?> sectorValuation(String symbol) async {
+    final response = await _client
+        .get(
+          _uri('/stocks/${Uri.encodeComponent(symbol)}/analysis'),
+          headers: _headers,
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode == 503 &&
+        jsonDecode(response.body)['detail'] ==
+            'Analysis awaits a successful market data sync') {
+      return null;
+    }
+    _expect(response, 200);
+    return SectorValuation.fromJson(
+      jsonDecode(response.body) as Map<String, dynamic>,
+    );
+  }
+
   Future<StockDetailBundle> stockDetail(
     String symbol, {
     String range = '1y',
@@ -1120,6 +1239,12 @@ class ApiClient {
     return data
         .map((item) => MarketNewsItem.fromJson(item as Map<String, dynamic>))
         .toList();
+  }
+
+  Future<List<MarketOffer>> publicOffers() async {
+    final response = await _client.get(_uri('/public/market/offers'));
+    _expect(response, 200);
+    return MarketOffer.parseList(jsonDecode(response.body) as List);
   }
 
   Future<List<MarketNewsItem>> publicMarketNews({int limit = 6}) async {
@@ -1333,23 +1458,25 @@ class Holding {
   final double quantity;
   final double avgPurchasePrice;
   final double? currentPrice;
-  final double totalValue;
+  final double? totalValue;
   final double totalCost;
-  final double profitLoss;
+  final double? profitLoss;
   final double? profitLossPercent;
   final String? notes;
 
   factory Holding.fromJson(Map<String, dynamic> json) {
+    final quote = asDouble(json['current_price']);
+    final priced = quote != null && quote.isFinite && quote > 0;
     return Holding(
       symbol: json['stock_symbol'] as String,
       name: json['stock_name'] as String?,
       quantity: asDouble(json['quantity']) ?? 0,
       avgPurchasePrice: asDouble(json['avg_purchase_price']) ?? 0,
-      currentPrice: asDouble(json['current_price']),
-      totalValue: asDouble(json['total_value']) ?? 0,
+      currentPrice: priced ? quote : null,
+      totalValue: priced ? asDouble(json['total_value']) : null,
       totalCost: asDouble(json['total_cost']) ?? 0,
-      profitLoss: asDouble(json['profit_loss']) ?? 0,
-      profitLossPercent: asDouble(json['profit_loss_percent']),
+      profitLoss: priced ? asDouble(json['profit_loss']) : null,
+      profitLossPercent: priced ? asDouble(json['profit_loss_percent']) : null,
       notes: json['notes'] as String?,
     );
   }
@@ -1368,6 +1495,25 @@ class Holding {
   }
 }
 
+String portfolioAmount(double? value) =>
+    value == null ? 'Quote pending' : moneyFormat.format(value);
+
+String portfolioPercent(double? value) =>
+    value == null ? 'Not available' : '${value.toStringAsFixed(2)}%';
+
+class PortfolioTotals {
+  PortfolioTotals(List<Holding> holdings)
+      : invested = holdings.fold<double>(0, (sum, item) => sum + item.totalCost),
+        value = holdings.any((item) => item.totalValue == null)
+            ? null
+            : holdings.fold<double>(0, (sum, item) => sum + item.totalValue!);
+
+  final double invested;
+  final double? value;
+  double? get profit => value == null ? null : value! - invested;
+  double? get percent => profit == null || invested == 0 ? null : profit! * 100 / invested;
+}
+
 class StockDetailBundle {
   StockDetailBundle({
     required this.stock,
@@ -1377,6 +1523,8 @@ class StockDetailBundle {
     required this.news,
     required this.dividends,
     required this.disclosures,
+    this.offers = const [],
+    this.financials = const FinancialsData(),
   });
 
   final Stock stock;
@@ -1386,6 +1534,8 @@ class StockDetailBundle {
   final List<CompanyNewsItem> news;
   final List<DividendRecord> dividends;
   final List<DisclosureItem> disclosures;
+  final List<MarketOffer> offers;
+  final FinancialsData financials;
 
   factory StockDetailBundle.fromJson(Map<String, dynamic> json) {
     final historyJson = json['history'] as List<dynamic>? ?? const [];
@@ -1412,6 +1562,8 @@ class StockDetailBundle {
       disclosures: disclosuresJson
           .map((item) => DisclosureItem.fromJson(item as Map<String, dynamic>))
           .toList(),
+      offers: MarketOffer.parseList(json['offers'] as List? ?? const []),
+      financials: FinancialsData.fromJson(json['financials'] as Map<String, dynamic>? ?? {}),
     );
   }
 }
@@ -1821,6 +1973,35 @@ class DividendRecord {
   }
 }
 
+class MarketOffer {
+  const MarketOffer(this.name, this.kind, this.status, this.nextDate, this.url);
+  final String name, kind, status, url;
+  final DateTime? nextDate;
+
+  static List<MarketOffer> parseList(List rows) => [
+    for (final row in rows.whereType<Map<String, dynamic>>())
+      MarketOffer(row['name'] as String, row['kind'] as String,
+        row['status'] as String, DateTime.tryParse(row['next_date'] as String? ?? ''),
+        row['url'] as String),
+  ];
+}
+
+List<FinancialReportLink> financialReportLinks(List<DisclosureItem> filings) {
+  final seen = <String>{};
+  return [
+    for (final filing in filings)
+      if (filing.url != null &&
+          Uri.tryParse(filing.url!)?.scheme == 'https' &&
+          RegExp(r'financial statement|annual report|audited.*result|earnings release', caseSensitive: false)
+              .hasMatch('${filing.category ?? ''} ${filing.title ?? ''}') &&
+          seen.add(filing.url!))
+        FinancialReportLink(
+          (filing.title ?? '').trim().isEmpty ? 'Financial statement' : filing.title!,
+          filing.url!,
+        ),
+  ];
+}
+
 class DisclosureItem {
   DisclosureItem({
     this.title,
@@ -2020,10 +2201,9 @@ class _AuthScreenState extends State<AuthScreen> {
   String? emailError;
   String? passwordError;
   late Future<LandingMarketData> landingFuture = _loadLandingData();
+  late Future<List<MarketOffer>> offersFuture = widget.api.publicOffers();
   late final Future<PackageInfo> packageInfoFuture = PackageInfo.fromPlatform();
   Timer? landingRefreshTimer;
-  Timer? marketMotionTimer;
-  int marketHeadlineIndex = 0;
 
   @override
   void initState() {
@@ -2032,18 +2212,14 @@ class _AuthScreenState extends State<AuthScreen> {
       if (!mounted) return;
       setState(() {
         landingFuture = _loadLandingData();
+        offersFuture = widget.api.publicOffers();
       });
-    });
-    marketMotionTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (!mounted) return;
-      setState(() => marketHeadlineIndex++);
     });
   }
 
   @override
   void dispose() {
     landingRefreshTimer?.cancel();
-    marketMotionTimer?.cancel();
     email.dispose();
     password.dispose();
     fullName.dispose();
@@ -2186,13 +2362,6 @@ class _AuthScreenState extends State<AuthScreen> {
         future: landingFuture,
         builder: (context, snapshot) {
           final landing = snapshot.data;
-          final combinedLeaders = <Stock>[
-            ...(landing?.leaders.topMovers ?? const <Stock>[]),
-            ...(landing?.leaders.topLosers ?? const <Stock>[]),
-          ];
-          final headlineStock = combinedLeaders.isEmpty
-              ? null
-              : combinedLeaders[marketHeadlineIndex % combinedLeaders.length];
 
           return Container(
             decoration: BoxDecoration(color: theme.scaffoldBackgroundColor),
@@ -2221,12 +2390,12 @@ class _AuthScreenState extends State<AuthScreen> {
                         setState(() => passwordError = null),
                   );
                   final marketView = _LandingMarketView(
+                    offersFuture: offersFuture,
                     theme: theme,
                     landing: landing,
                     loading:
                         snapshot.connectionState == ConnectionState.waiting &&
                         landing == null,
-                    headlineStock: headlineStock,
                     onOpenStock: _openLandingStockDetail,
                   );
                   final themeButton = Align(
@@ -2253,9 +2422,9 @@ class _AuthScreenState extends State<AuthScreen> {
                   if (isDesktop) {
                     return SingleChildScrollView(
                       padding: const EdgeInsets.all(20),
-                      child: ConstrainedBox(
+                      child: Align(alignment: Alignment.topCenter, child: ConstrainedBox(
                         constraints: BoxConstraints(
-                          minHeight: max(0, constraints.maxHeight - 40),
+                          maxWidth: 1340, minHeight: max(0, constraints.maxHeight - 40),
                         ),
                         child: Column(
                           children: [
@@ -2272,7 +2441,7 @@ class _AuthScreenState extends State<AuthScreen> {
                             footer,
                           ],
                         ),
-                      ),
+                      )),
                     );
                   }
 
@@ -2280,6 +2449,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     onRefresh: () async {
                       setState(() {
                         landingFuture = _loadLandingData();
+                        offersFuture = widget.api.publicOffers();
                       });
                       await landingFuture;
                     },
@@ -2339,26 +2509,13 @@ class _AuthHeroPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = theme.colorScheme;
-    final muted = theme.textTheme.bodyMedium?.copyWith(
-      color: scheme.onSurfaceVariant,
-      height: 1.4,
-    );
     return Container(
       decoration: BoxDecoration(
         color: theme.brightness == Brightness.dark
             ? _darkSurface
             : Colors.white,
-        borderRadius: BorderRadius.circular(24),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(color: scheme.outlineVariant),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(
-              alpha: theme.brightness == Brightness.dark ? 0.16 : 0.04,
-            ),
-            blurRadius: 28,
-            offset: const Offset(0, 14),
-          ),
-        ],
       ),
       child: Padding(
         padding: const EdgeInsets.all(28),
@@ -2370,18 +2527,7 @@ class _AuthHeroPanel extends StatelessWidget {
                 const BrandMark(),
                 const SizedBox(width: 12),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Stockfolio NG', style: theme.textTheme.titleLarge),
-                      Text(
-                        'Track Nigerian equities with live market context.',
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: scheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
+                  child: Text('Stockfolio NG', style: theme.textTheme.titleLarge),
                 ),
               ],
             ),
@@ -2391,29 +2537,6 @@ class _AuthHeroPanel extends StatelessWidget {
               style: theme.textTheme.headlineSmall?.copyWith(
                 fontWeight: FontWeight.w700,
               ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              registerMode
-                  ? 'Build a personal portfolio, watch movers, and follow your holdings with charts.'
-                  : 'Sign in to your dashboard, portfolio alerts, charts, and market overview.',
-              style: muted,
-            ),
-            const SizedBox(height: 20),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: const [
-                _LandingTag(icon: Icons.show_chart, text: 'Live market view'),
-                _LandingTag(
-                  icon: Icons.account_balance_wallet,
-                  text: 'Portfolio tracking',
-                ),
-                _LandingTag(
-                  icon: Icons.notifications_active_outlined,
-                  text: 'Alerts',
-                ),
-              ],
             ),
             const SizedBox(height: 24),
             AutofillGroup(
@@ -2465,27 +2588,6 @@ class _AuthHeroPanel extends StatelessWidget {
                 ],
               ),
             ),
-            if (!registerMode) ...[
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Icon(
-                    Icons.password_outlined,
-                    size: 16,
-                    color: theme.colorScheme.secondary,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Your browser or device can offer to save this password after sign in.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
             const SizedBox(height: 20),
             Wrap(
               spacing: 12,
@@ -2529,215 +2631,44 @@ class _AuthHeroPanel extends StatelessWidget {
 
 class _LandingMarketView extends StatelessWidget {
   const _LandingMarketView({
+    required this.offersFuture,
     required this.theme,
     required this.landing,
     required this.loading,
-    required this.headlineStock,
     required this.onOpenStock,
   });
 
   final ThemeData theme;
   final LandingMarketData? landing;
+  final Future<List<MarketOffer>> offersFuture;
   final bool loading;
-  final Stock? headlineStock;
   final ValueChanged<Stock> onOpenStock;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = theme.colorScheme;
     final leaders = landing?.leaders;
     final movers = leaders?.topMovers ?? const <Stock>[];
     final losers = leaders?.topLosers ?? const <Stock>[];
-    final chartStocks = [...movers.take(3), ...losers.take(2)];
-    final status = landing?.status;
-    final statusPalette = marketStatusPalette(
-      theme,
-      status?.status ?? 'UNKNOWN',
-      stale: status?.stale ?? false,
-    );
-    final heroBackground = theme.brightness == Brightness.dark
-        ? const LinearGradient(
-            colors: [Color(0xFF132328), Color(0xFF0D181C)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          )
-        : const LinearGradient(
-            colors: [Color(0xFF10352F), Color(0xFF16443C)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Container(
-          padding: const EdgeInsets.all(22),
-          decoration: BoxDecoration(
-            gradient: heroBackground,
-            borderRadius: BorderRadius.circular(28),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.14),
-                blurRadius: 32,
-                offset: const Offset(0, 18),
-              ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: statusPalette.container.withValues(
-                        alpha: theme.brightness == Brightness.dark
-                            ? 0.82
-                            : 0.95,
-                      ),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          statusPalette.icon,
-                          size: 18,
-                          color: statusPalette.content,
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          landing == null
-                              ? 'Market pulse loading'
-                              : 'Market status: ${friendlyMarketStatusLabel(landing!.status.status)}',
-                          style: TextStyle(
-                            color: statusPalette.content,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (landing?.status.message != null &&
-                      landing!.status.message!.isNotEmpty)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 8,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        landing!.status.message!,
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.82),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 18),
-              Text(
-                'See the market move before you even log in.',
-                style: theme.textTheme.headlineMedium?.copyWith(
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Live movers, opening-versus-current momentum, and a portfolio-focused workflow for Nigerian equities.',
-                style: theme.textTheme.bodyLarge?.copyWith(
-                  color: Colors.white.withValues(alpha: 0.82),
-                ),
-              ),
-              const SizedBox(height: 18),
-              if (loading)
-                const LinearProgressIndicator()
-              else if (headlineStock != null)
-                _LandingHeadlineCard(
-                  stock: headlineStock!,
-                  onTap: () => onOpenStock(headlineStock!),
-                ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        Wrap(
-          spacing: 12,
-          runSpacing: 12,
-          children: [
-            _LandingMetricTile(
-              label: 'Top gainers tracked',
-              value: movers.length.toString(),
-              icon: Icons.local_fire_department_outlined,
-              tone: const Color(0xFFDB5C19),
-            ),
-            _LandingMetricTile(
-              label: 'Top losers tracked',
-              value: losers.length.toString(),
-              icon: Icons.trending_down_outlined,
-              tone: const Color(0xFFB83232),
-            ),
-            _LandingMetricTile(
-              label: 'Market mood',
-              value: landing?.status.status ?? 'Loading',
-              icon: Icons.wifi_tethering_outlined,
-              tone: const Color(0xFF0E7C66),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final chartPanel = Container(
-              constraints: const BoxConstraints(minHeight: 340),
-              padding: const EdgeInsets.all(18),
-              decoration: BoxDecoration(
-                color: theme.brightness == Brightness.dark
-                    ? _darkSurface
-                    : Colors.white,
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: scheme.outlineVariant),
-              ),
-              child: _LandingPulseChart(stocks: chartStocks),
-            );
-            final sidePanel = MarketLeadersSlideshow(
-              movers: movers,
-              losers: losers,
-              onStockTap: onOpenStock,
-            );
-
-            if (constraints.maxWidth >= 980) {
-              return Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(flex: 8, child: chartPanel),
-                  const SizedBox(width: 16),
-                  Expanded(flex: 5, child: sidePanel),
-                ],
-              );
-            }
-
-            return Column(
-              children: [chartPanel, const SizedBox(height: 12), sidePanel],
-            );
-          },
-        ),
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Container(
+        color: const Color(0xff123d36), padding: const EdgeInsets.all(20),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Nigerian equity market', style: theme.textTheme.headlineSmall?.copyWith(color: Colors.white, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          Text(landing == null ? (loading ? 'Loading market status' : 'Market data unavailable') :
+            '${friendlyMarketStatusLabel(landing!.status.status)}${landing!.status.stale ? ' · Last reported' : ''}',
+            style: const TextStyle(color: Color(0xffc1d7d0))),
+          if ((landing?.status.message ?? '').isNotEmpty) Text(landing!.status.message!, style: const TextStyle(color: Colors.white)),
+        ]),
+      ),
+      const SizedBox(height: 16),
+      MarketLeadersBoard(movers: movers, losers: losers, onStockTap: onOpenStock),
+      OpeningMoves(stocks: [...movers.take(3), ...losers.take(3)]),
+        _AsyncOffers(future: offersFuture),
         if (landing?.news.isNotEmpty == true) ...[
           const SizedBox(height: 16),
           MarketNewsPanel(
             title: 'Market news',
-            subtitle:
-                'Latest NGX Pulse headlines are available on web and mobile from the same feed.',
             news: landing!.news,
           ),
         ],
@@ -2746,408 +2677,16 @@ class _LandingMarketView extends StatelessWidget {
   }
 }
 
-class _LandingHeadlineCard extends StatelessWidget {
-  const _LandingHeadlineCard({required this.stock, required this.onTap});
-
-  final Stock stock;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final positive = (stock.percentChange ?? 0) >= 0;
-    final accent = positive ? const Color(0xFF5ED19B) : const Color(0xFFFFB4B4);
-    return AnimatedSwitcher(
-      duration: const Duration(milliseconds: 500),
-      child: InkWell(
-        key: ValueKey(stock.symbol),
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.08),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
-          ),
-          child: Row(
-            children: [
-              CompanyLogo(symbol: stock.symbol, size: 46),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      stock.symbol,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 18,
-                      ),
-                    ),
-                    Text(
-                      stock.name ?? stock.symbol,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.72),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    stock.lastPrice == null
-                        ? 'No price'
-                        : moneyFormat.format(stock.lastPrice),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      fontSize: 18,
-                    ),
-                  ),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        trendDirectionIcon(positive),
-                        size: 18,
-                        color: accent,
-                      ),
-                      Text(
-                        '${stock.percentChange?.toStringAsFixed(2) ?? '0.00'}%',
-                        style: TextStyle(
-                          color: accent,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _LandingPulseChart extends StatelessWidget {
   const _LandingPulseChart({required this.stocks});
-
   final List<Stock> stocks;
-
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    if (stocks.isEmpty) {
-      return const EmptyState(
-        icon: Icons.multiline_chart,
-        text: 'Market graph is warming up.',
-      );
-    }
-
-    final lines = <_LandingChartSeries>[];
-    final allY = <double>[];
-    final palette = <Color>[
-      const Color(0xFF0E7C66),
-      const Color(0xFFDB5C19),
-      const Color(0xFF3A7BD5),
-      const Color(0xFF9C27B0),
-      const Color(0xFFB83232),
-    ];
-
-    for (var i = 0; i < stocks.length; i++) {
-      final stock = stocks[i];
-      final open = stock.openPrice ?? stock.lastPrice;
-      final close = stock.lastPrice;
-      if (open == null || close == null || open <= 0 || close <= 0) {
-        continue;
-      }
-      final delta = close - open;
-      final spots = List.generate(10, (index) {
-        final t = index / 9;
-        final curve = sin(t * pi) * delta * 0.22;
-        final value = open + (delta * t) + curve;
-        allY.add(value);
-        return FlSpot(index.toDouble(), value);
-      });
-      lines.add(
-        _LandingChartSeries(
-          stock: stock,
-          color: palette[i % palette.length],
-          spots: spots,
-        ),
-      );
-    }
-
-    if (lines.isEmpty || allY.isEmpty) {
-      return const EmptyState(
-        icon: Icons.multiline_chart,
-        text: 'Market graph is warming up.',
-      );
-    }
-
-    final axisScale = chartAxisScaleFromZero(allY);
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 640;
-        final labels = compact
-            ? {0: 'Open', 9: 'Now'}
-            : {0: 'Open', 4: 'Noon', 9: 'Now'};
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Market pulse',
-              style: theme.textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'A live-style view built from today’s opening price versus current market price.',
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              height: compact ? 250 : 230,
-              child: LineChart(
-                LineChartData(
-                  minX: 0,
-                  maxX: 9,
-                  minY: 0,
-                  maxY: axisScale.maxY,
-                  borderData: FlBorderData(show: false),
-                  gridData: FlGridData(
-                    show: true,
-                    drawVerticalLine: true,
-                    verticalInterval: compact ? 3 : 2,
-                    getDrawingHorizontalLine: (_) =>
-                        FlLine(color: chartGridColor(theme), strokeWidth: 1),
-                    getDrawingVerticalLine: (_) =>
-                        FlLine(color: chartGridColor(theme), strokeWidth: 1),
-                  ),
-                  titlesData: FlTitlesData(
-                    topTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    rightTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    bottomTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 30,
-                        getTitlesWidget: (value, meta) {
-                          final index = value.round();
-                          if ((value - index).abs() > 0.05 ||
-                              !labels.containsKey(index)) {
-                            return const SizedBox.shrink();
-                          }
-                          return Padding(
-                            padding: const EdgeInsets.only(top: 8),
-                            child: Text(
-                              labels[index]!,
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                    leftTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: compact ? 44 : 52,
-                        interval: axisScale.interval,
-                        getTitlesWidget: (value, meta) => Padding(
-                          padding: const EdgeInsets.only(right: 8),
-                          child: Text(
-                            chartAxisLabel(value),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  lineBarsData: [
-                    for (final line in lines)
-                      LineChartBarData(
-                        spots: line.spots,
-                        isCurved: true,
-                        barWidth: 3,
-                        color: line.color,
-                        dotData: const FlDotData(show: false),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            Wrap(
-              spacing: 12,
-              runSpacing: 10,
-              children: [
-                for (final line in lines)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: line.color.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: line.color.withValues(alpha: 0.18),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 10,
-                          height: 10,
-                          decoration: BoxDecoration(
-                            color: line.color,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Text(
-                            '${line.stock.symbol} ${line.stock.percentChange?.toStringAsFixed(2) ?? '0.00'}%',
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _LandingChartSeries {
-  const _LandingChartSeries({
-    required this.stock,
-    required this.color,
-    required this.spots,
-  });
-
-  final Stock stock;
-  final Color color;
-  final List<FlSpot> spots;
-}
-
-class _LandingMetricTile extends StatelessWidget {
-  const _LandingMetricTile({
-    required this.label,
-    required this.value,
-    required this.icon,
-    required this.tone,
-  });
-
-  final String label;
-  final String value;
-  final IconData icon;
-  final Color tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return SizedBox(
-      width: 220,
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: theme.brightness == Brightness.dark
-              ? _darkSurface
-              : Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: scheme.outlineVariant),
-        ),
-        child: Row(
-          children: [
-            CircleAvatar(
-              backgroundColor: tone.withValues(alpha: 0.12),
-              child: Icon(icon, color: tone),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    label,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: scheme.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    value,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _LandingTag extends StatelessWidget {
-  const _LandingTag({required this.icon, required this.text});
-
-  final IconData icon;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest.withValues(alpha: 0.7),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: scheme.outlineVariant),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: scheme.primary),
-          const SizedBox(width: 6),
-          Text(text),
-        ],
-      ),
-    );
-  }
+  Widget build(BuildContext context) => Wrap(spacing: 16, runSpacing: 8, children: [
+    for (final stock in stocks) ...[
+      StockDetailValue(label: 'Open', value: _amount(stock.openPrice)),
+      StockDetailValue(label: 'Latest', value: _amount(stock.lastPrice)),
+    ],
+  ]);
 }
 
 class EmailVerificationScreen extends StatefulWidget {
@@ -3411,10 +2950,12 @@ class LandingStockDetailSheet extends StatefulWidget {
     super.key,
     required this.api,
     required this.stock,
+    this.showValuation = false,
   });
 
   final ApiClient api;
   final Stock stock;
+  final bool showValuation;
 
   @override
   State<LandingStockDetailSheet> createState() =>
@@ -3588,6 +3129,23 @@ class _LandingStockDetailSheetState extends State<LandingStockDetailSheet> {
                       ),
                     ],
                   ),
+                  if (widget.showValuation) ...[
+                    const SizedBox(height: 18),
+                    EarningsFinancialsSection(
+                      key: ValueKey('financials-${widget.stock.symbol}'),
+                      symbol: widget.stock.symbol,
+                      data: detail?.financials ?? const FinancialsData(),
+                      reports: financialReportLinks(disclosures),
+                      onOpenReport: (url) => openExternalUrl(context, url),
+                      loading: loading,
+                      failed: snapshot.hasError,
+                    ),
+                    const SizedBox(height: 18),
+                    SectorValuationSection(
+                      symbol: widget.stock.symbol,
+                      load: widget.api.sectorValuation,
+                    ),
+                  ],
                   const SizedBox(height: 18),
                   Text(
                     'Dividend history',
@@ -3603,19 +3161,12 @@ class _LandingStockDetailSheetState extends State<LandingStockDetailSheet> {
                   else
                     ...dividends.map((item) => DividendTile(item: item)),
                   const SizedBox(height: 18),
-                  Text(
-                    'Recent disclosures',
-                    style: Theme.of(context).textTheme.titleMedium,
+                  DisclosureSection(
+                    key: ValueKey(resolvedStock.symbol),
+                    filings: disclosures,
+                    offers: detail?.offers ?? const [],
+                    loading: loading,
                   ),
-                  const SizedBox(height: 8),
-                  if (disclosures.isEmpty)
-                    Text(
-                      loading
-                          ? 'Loading disclosures...'
-                          : 'No recent disclosures available.',
-                    )
-                  else
-                    ...disclosures.map((item) => DisclosureTile(item: item)),
                   const SizedBox(height: 18),
                   Text(
                     'Company updates',
@@ -4183,31 +3734,17 @@ class _DashboardShellState extends State<DashboardShell> {
             onSignOut: widget.onSignOut,
           ),
           appBar: AppBar(
-            backgroundColor: Colors.transparent,
+            backgroundColor: theme.colorScheme.surface,
             foregroundColor: headerForeground,
             elevation: 0,
-            flexibleSpace: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: theme.brightness == Brightness.dark
-                    ? const LinearGradient(
-                        colors: [Color(0xFF10382F), Color(0xFF0A5B49)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      )
-                    : const LinearGradient(
-                        colors: [Color(0xFFD6E9E4), Color(0xFFE3F0ED)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-              ),
-            ),
+            surfaceTintColor: Colors.transparent,
             leading: IconButton(
               tooltip: 'Menu',
               onPressed: () => _scaffoldKey.currentState?.openDrawer(),
               icon: const Icon(Icons.menu_rounded),
             ),
             title: Text(
-              user == null ? 'Stockfolio' : 'Welcome, ${user.firstName}',
+              destinations[index].label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -4260,7 +3797,9 @@ class _DashboardShellState extends State<DashboardShell> {
                             destinations: railDestinations,
                           ),
                           const VerticalDivider(width: 1),
-                          Expanded(child: screens[index]),
+                          Expanded(child: Align(alignment: Alignment.topCenter, child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 1340), child: screens[index],
+                          ))),
                         ],
                       );
                     }
@@ -4632,6 +4171,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late Future<MarketLeaders> leadersFuture = widget.api.marketLeaders();
   late Future<MarketIdeasBundle> ideasFuture = widget.api.marketIdeas();
   late Future<List<MarketNewsItem>> newsFuture = widget.api.marketNews();
+  late Future<List<MarketOffer>> offersFuture = widget.api.publicOffers();
   Timer? refreshTimer;
 
   @override
@@ -4660,12 +4200,17 @@ class _HomeScreenState extends State<HomeScreen> {
       leadersFuture = widget.api.marketLeaders();
       ideasFuture = widget.api.marketIdeas();
       newsFuture = widget.api.marketNews();
+      offersFuture = widget.api.publicOffers();
     });
   }
 
   Future<void> _openStockDetail(Stock stock) async {
     final compact = MediaQuery.of(context).size.width < 760;
-    final content = LandingStockDetailSheet(api: widget.api, stock: stock);
+    final content = LandingStockDetailSheet(
+      api: widget.api,
+      stock: stock,
+      showValuation: true,
+    );
     if (compact) {
       await showModalBottomSheet<void>(
         context: context,
@@ -4695,29 +4240,18 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return RefreshIndicator(
       onRefresh: () async => refresh(),
       child: FutureBuilder<List<Holding>>(
         future: holdingsFuture,
         builder: (context, snapshot) {
           final holdings = snapshot.data ?? [];
-          final totalValue = holdings.fold<double>(
-            0,
-            (sum, item) => sum + item.totalValue,
-          );
-          final totalCost = holdings.fold<double>(
-            0,
-            (sum, item) => sum + item.totalCost,
-          );
-          final profitLoss = totalValue - totalCost;
-          final profitPercent = totalCost == 0
-              ? 0.0
-              : (profitLoss / totalCost) * 100;
+          final totals = PortfolioTotals(holdings);
           Holding? bestHolding;
           Holding? weakestHolding;
           for (final holding in holdings) {
-            final change = holding.profitLossPercent ?? 0;
+            final change = holding.profitLossPercent;
+            if (change == null) continue;
             if (bestHolding == null ||
                 change >
                     (bestHolding.profitLossPercent ??
@@ -4734,61 +4268,24 @@ class _HomeScreenState extends State<HomeScreen> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              _PortfolioOverviewHero(
-                totalValue: totalValue,
-                profitLoss: profitLoss,
-                profitPercent: profitPercent,
-                holdingCount: holdings.length,
-                bestHolding: bestHolding,
-                weakestHolding: weakestHolding,
-                hideFinancialValues: widget.hideFinancialValues,
-                onToggleVisibility: widget.onToggleFinancialPrivacy,
-              ),
-              const SizedBox(height: 18),
-              Text(
-                'Your dashboard',
-                style: theme.textTheme.titleLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
+              if (snapshot.hasData) ...[
+                PortfolioSummaryStrip(totals: totals, hidden: widget.hideFinancialValues,
+                    togglePrivacy: widget.onToggleFinancialPrivacy),
+                if (!widget.hideFinancialValues && bestHolding != null) Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: HoldingReturnHighlights(
+                    highest: bestHolding,
+                    lowest: weakestHolding,
+                    onSelect: (holding) => _openStockDetail(Stock.fromJson({
+                      'symbol': holding.symbol,
+                      'name': holding.name,
+                      'last_price': holding.currentPrice,
+                    })),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'A quick read on your portfolio health and the market leaders shaping today.',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: [
-                  MetricCard(
-                    label: 'Unrealized return',
-                    value: '${profitPercent.toStringAsFixed(2)}%',
-                    icon: Icons.payments,
-                    positive: profitLoss >= 0,
-                  ),
-                  MetricCard(
-                    label: 'Best holding',
-                    value: bestHolding == null
-                        ? '-'
-                        : '${bestHolding.symbol} ${(bestHolding.profitLossPercent ?? 0).toStringAsFixed(2)}%',
-                    icon: Icons.emoji_events_outlined,
-                    positive: (bestHolding?.profitLossPercent ?? 0) >= 0,
-                  ),
-                  MetricCard(
-                    label: 'Needs attention',
-                    value: weakestHolding == null
-                        ? '-'
-                        : '${weakestHolding.symbol} ${(weakestHolding.profitLossPercent ?? 0).toStringAsFixed(2)}%',
-                    icon: profitLoss >= 0
-                        ? Icons.monitor_heart_outlined
-                        : Icons.warning_amber_rounded,
-                    positive: false,
-                  ),
-                ],
-              ),
+              ] else if (snapshot.hasError)
+                TextButton.icon(onPressed: refresh, icon: const Icon(Icons.refresh), label: const Text('Reload portfolio'))
+              else const LinearProgressIndicator(),
               const SizedBox(height: 16),
               FutureBuilder<MarketLeaders>(
                 future: leadersFuture,
@@ -4804,7 +4301,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     );
                   }
-                  return MarketLeadersSlideshow(
+                  return MarketLeadersBoard(
                     movers: leaders?.topMovers ?? const [],
                     losers: leaders?.topLosers ?? const [],
                     onStockTap: (stock) => _openStockDetail(stock),
@@ -4856,6 +4353,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 },
               ),
               const SizedBox(height: 16),
+              _AsyncOffers(future: offersFuture),
               FutureBuilder<List<MarketNewsItem>>(
                 future: newsFuture,
                 builder: (context, newsSnapshot) {
@@ -4874,8 +4372,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   }
                   return MarketNewsPanel(
                     title: 'Market news',
-                    subtitle:
-                        'Live headlines from NGX Pulse so the web and app surfaces stay in step.',
                     news: news,
                   );
                 },
@@ -5530,6 +5026,12 @@ class _AccountScreenState extends State<AccountScreen> {
                 ),
               ],
             ),
+            if (widget.api.biometricSession.supported) ...[
+              const SizedBox(height: 20),
+              const Divider(),
+              BiometricSettingsTile(session: widget.api.biometricSession,
+                onChanged: widget.api.setBiometricUnlock),
+            ],
           ],
         );
       },
@@ -5615,6 +5117,24 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
     });
   }
 
+  Future<void> openMobileDetail(Holding holding) async {
+    var range = StockHistoryRange.oneYear;
+    var detail = widget.api.stockDetail(holding.symbol, range: range.queryValue);
+    await showModalBottomSheet<void>(
+      context: context, isScrollControlled: true, useSafeArea: true, showDragHandle: true,
+      builder: (_) => StatefulBuilder(builder: (context, update) => SizedBox(
+        height: MediaQuery.sizeOf(context).height * .8,
+        child: SingleChildScrollView(child: PortfolioHoldingDetail(
+          api: widget.api, holding: holding, detailFuture: detail, selectedRange: range,
+          onRangeSelected: (next) => update(() {
+            range = next;
+            detail = widget.api.stockDetail(holding.symbol, range: next.queryValue);
+          }),
+        )),
+      )),
+    );
+  }
+
   Future<void> addHolding([Holding? holding]) async {
     final result = await showDialog<HoldingInput>(
       context: context,
@@ -5647,22 +5167,22 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
     return FutureBuilder<List<Holding>>(
       future: future,
       builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          if (snapshot.hasError) {
+            return Center(child: TextButton.icon(
+              onPressed: refresh,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Could not load portfolio. Retry'),
+            ));
+          }
+          return const Center(child: CircularProgressIndicator());
+        }
         final holdings = snapshot.data ?? [];
-        final totalValue = holdings.fold<double>(
-          0,
-          (sum, item) => sum + item.totalValue,
-        );
-        final totalCost = holdings.fold<double>(
-          0,
-          (sum, item) => sum + item.totalCost,
-        );
-        final profitLoss = totalValue - totalCost;
-        if (selectedHolding != null &&
-            !holdings.any(
-              (holding) => holding.symbol == selectedHolding!.symbol,
-            )) {
-          selectedHolding = null;
-          selectedDetailFuture = null;
+        final totals = PortfolioTotals(holdings);
+        if (selectedHolding != null && snapshot.hasData) {
+          final symbol = selectedHolding!.symbol;
+          selectedHolding = holdings.where((h) => h.symbol == symbol).firstOrNull;
+          if (selectedHolding == null) selectedDetailFuture = null;
         }
 
         return RefreshIndicator(
@@ -5670,58 +5190,9 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
           child: ListView(
             padding: const EdgeInsets.all(16),
             children: [
-              Wrap(
-                spacing: 12,
-                runSpacing: 12,
-                children: [
-                  MetricCard(
-                    label: 'Portfolio value',
-                    value: widget.hideFinancialValues
-                        ? '*****'
-                        : moneyFormat.format(totalValue),
-                    icon: Icons.payments,
-                  ),
-                  MetricCard(
-                    label: 'Amount invested',
-                    value: widget.hideFinancialValues
-                        ? '*****'
-                        : moneyFormat.format(totalCost),
-                    icon: Icons.savings,
-                  ),
-                  MetricCard(
-                    label: 'Profit / loss',
-                    value: widget.hideFinancialValues
-                        ? '*****'
-                        : moneyFormat.format(profitLoss),
-                    icon: profitLoss >= 0
-                        ? Icons.trending_up
-                        : Icons.trending_down,
-                    positive: profitLoss >= 0,
-                  ),
-                  MetricCard(
-                    label: widget.hideFinancialValues
-                        ? 'Reveal totals'
-                        : 'Hide totals',
-                    value: widget.hideFinancialValues
-                        ? 'Tap to show'
-                        : 'Tap to hide',
-                    icon: widget.hideFinancialValues
-                        ? Icons.visibility_outlined
-                        : Icons.visibility_off_outlined,
-                    onTap: widget.onToggleFinancialPrivacy,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: FilledButton.icon(
-                  onPressed: () => addHolding(),
-                  icon: const Icon(Icons.add),
-                  label: const Text('Add holding'),
-                ),
-              ),
-              const SizedBox(height: 16),
+              PortfolioSummaryStrip(totals: totals, hidden: widget.hideFinancialValues,
+                  togglePrivacy: widget.onToggleFinancialPrivacy),
+              const SizedBox(height: 24),
               if (snapshot.connectionState == ConnectionState.waiting)
                 const Center(
                   child: Padding(
@@ -5730,48 +5201,39 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
                   ),
                 )
               else if (holdings.isEmpty)
-                const EmptyState(
-                  icon: Icons.account_balance_wallet_outlined,
-                  text: 'No holdings yet.',
-                )
+                HoldingsLedger(holdings: holdings, selectedSymbol: null, onSelect: selectHolding,
+                    onEdit: addHolding, onDelete: remove, onAdd: () => addHolding())
               else
                 LayoutBuilder(
                   builder: (context, constraints) {
                     final selected = selectedHolding;
-                    final detail = PortfolioHoldingDetail(
-                      holding: selected,
-                      detailFuture: selectedDetailFuture,
-                      selectedRange: selectedDetailRange,
-                      onRangeSelected: selectDetailRange,
+                    final wide = constraints.maxWidth >= 960;
+                    final list = HoldingsLedger(
+                      holdings: holdings, selectedSymbol: wide ? selected?.symbol : null,
+                      onSelect: wide ? selectHolding : openMobileDetail,
+                      onEdit: addHolding, onDelete: remove, onAdd: () => addHolding(),
                     );
-                    final holdingCards = holdings
-                        .map(
-                          (holding) => HoldingTile(
-                            holding: holding,
-                            selected: holding.symbol == selected?.symbol,
-                            onTap: () => selectHolding(holding),
-                            onEdit: () => addHolding(holding),
-                            onDelete: () => remove(holding.symbol),
+                    final allocation = PortfolioAllocation(holdings: holdings);
+                    if (!wide) return Column(children: [list, const SizedBox(height: 20), allocation]);
+                    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Expanded(flex: 7, child: list),
+                      const SizedBox(width: 24),
+                      Expanded(flex: 4, child: selected == null ? allocation : Column(
+                        crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          TextButton.icon(
+                            icon: const Icon(Icons.arrow_back, size: 18),
+                            label: const Text('Allocation'),
+                            onPressed: () => setState(() {
+                              selectedHolding = null;
+                              selectedDetailFuture = null;
+                            }),
                           ),
-                        )
-                        .toList();
-                    if (constraints.maxWidth >= 980) {
-                      return Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(child: Column(children: holdingCards)),
-                          const SizedBox(width: 16),
-                          SizedBox(width: 440, child: detail),
+                          PortfolioHoldingDetail(api: widget.api, holding: selected,
+                            detailFuture: selectedDetailFuture, selectedRange: selectedDetailRange,
+                            onRangeSelected: selectDetailRange),
                         ],
-                      );
-                    }
-                    return Column(
-                      children: [
-                        detail,
-                        const SizedBox(height: 12),
-                        ...holdingCards,
-                      ],
-                    );
+                      )),
+                    ]);
                   },
                 ),
             ],
@@ -5783,10 +5245,11 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
 }
 
 class CompanyLogo extends StatelessWidget {
-  const CompanyLogo({super.key, required this.symbol, this.size = 40});
+  const CompanyLogo({super.key, required this.symbol, this.size = 40, this.useInitials = false});
 
   final String symbol;
   final double size;
+  final bool useInitials;
 
   @override
   Widget build(BuildContext context) {
@@ -5799,7 +5262,10 @@ class CompanyLogo extends StatelessWidget {
         shape: BoxShape.circle,
       ),
       alignment: Alignment.center,
-      child: Icon(
+      child: useInitials && symbol.isNotEmpty ? Text(
+        symbol.substring(0, min(2, symbol.length)).toUpperCase(),
+        style: TextStyle(color: colorScheme.onPrimaryContainer, fontSize: size * .35, fontWeight: FontWeight.w700),
+      ) : Icon(
         Icons.business_outlined,
         size: size * 0.55,
         color: colorScheme.onPrimaryContainer,
@@ -5839,215 +5305,6 @@ class CompanyLogo extends StatelessWidget {
   }
 }
 
-class HoldingTile extends StatelessWidget {
-  const HoldingTile({
-    super.key,
-    required this.holding,
-    required this.selected,
-    required this.onTap,
-    required this.onEdit,
-    required this.onDelete,
-  });
-
-  final Holding holding;
-  final bool selected;
-  final VoidCallback onTap;
-  final VoidCallback onEdit;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Card(
-      color: selected
-          ? colorScheme.primaryContainer.withValues(alpha: 0.35)
-          : null,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          if (constraints.maxWidth < 620) {
-            return InkWell(
-              onTap: onTap,
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        CompanyLogo(symbol: holding.symbol),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                holding.symbol,
-                                style: Theme.of(context).textTheme.titleMedium,
-                              ),
-                              Text(
-                                holding.name ?? holding.symbol,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton(
-                          tooltip: 'Edit',
-                          onPressed: onEdit,
-                          icon: const Icon(Icons.edit_outlined),
-                        ),
-                        IconButton(
-                          tooltip: 'Delete',
-                          onPressed: onDelete,
-                          icon: const Icon(Icons.delete_outline),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 18,
-                      runSpacing: 8,
-                      children: [
-                        StockDetailValue(
-                          label: 'Shares',
-                          value: holding.quantity.toStringAsFixed(2),
-                        ),
-                        StockDetailValue(
-                          label: 'Purchase price',
-                          value: moneyFormat.format(holding.avgPurchasePrice),
-                        ),
-                        StockDetailValue(
-                          label: 'Invested',
-                          value: moneyFormat.format(holding.totalCost),
-                        ),
-                        StockDetailValue(
-                          label: 'Current value',
-                          value: moneyFormat.format(holding.totalValue),
-                        ),
-                        StockDetailValue(
-                          label: 'P/L',
-                          value:
-                              '${holding.profitLossPercent?.toStringAsFixed(2) ?? '0.00'}%',
-                          positive: holding.profitLoss >= 0,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-
-          final desktopValueWidth = constraints.maxWidth >= 1500
-              ? 340.0
-              : constraints.maxWidth >= 1250
-              ? 300.0
-              : 260.0;
-
-          return InkWell(
-            onTap: onTap,
-            borderRadius: BorderRadius.circular(24),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-              child: Row(
-                children: [
-                  CompanyLogo(symbol: holding.symbol, size: 46),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          holding.symbol,
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${holding.name ?? holding.symbol} - ${holding.quantity.toStringAsFixed(2)} shares',
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleSmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  SizedBox(
-                    width: desktopValueWidth,
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text(
-                          moneyFormat.format(holding.totalValue),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Invested ${moneyFormat.format(holding.totalCost)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.right,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
-                              ),
-                        ),
-                        Text(
-                          'Buy ${moneyFormat.format(holding.avgPurchasePrice)}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          textAlign: TextAlign.right,
-                          style: Theme.of(context).textTheme.bodyMedium
-                              ?.copyWith(
-                                color: Theme.of(
-                                  context,
-                                ).colorScheme.onSurfaceVariant,
-                              ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          '${holding.profitLossPercent?.toStringAsFixed(2) ?? '0.00'}%',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleSmall
-                              ?.copyWith(
-                                color: holding.profitLoss >= 0
-                                    ? Colors.green.shade700
-                                    : Colors.red.shade700,
-                                fontWeight: FontWeight.w700,
-                              ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  IconButton(
-                    tooltip: 'Edit',
-                    onPressed: onEdit,
-                    icon: const Icon(Icons.edit_outlined),
-                  ),
-                  IconButton(
-                    tooltip: 'Delete',
-                    onPressed: onDelete,
-                    icon: const Icon(Icons.delete_outline),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
 
 class StockDetailValue extends StatelessWidget {
   const StockDetailValue({
@@ -6098,12 +5355,14 @@ class PortfolioHoldingDetail extends StatelessWidget {
   const PortfolioHoldingDetail({
     super.key,
     required this.holding,
+    required this.api,
     required this.detailFuture,
     required this.selectedRange,
     required this.onRangeSelected,
   });
 
   final Holding? holding;
+  final ApiClient api;
   final Future<StockDetailBundle>? detailFuture;
   final StockHistoryRange selectedRange;
   final ValueChanged<StockHistoryRange> onRangeSelected;
@@ -6128,8 +5387,9 @@ class PortfolioHoldingDetail extends StatelessWidget {
         child: FutureBuilder<StockDetailBundle>(
           future: detailFuture,
           builder: (context, snapshot) {
-            final detail = snapshot.data;
+            final detail = snapshot.data?.stock.symbol == holding!.symbol ? snapshot.data : null;
             final stock = detail?.stock;
+            final pending = holding!.quantity > 0 && holding!.currentPrice == null;
             final points = detail?.history ?? [];
             final latest = points.isEmpty ? null : points.last;
             final marketSnapshot = detail?.marketSnapshot;
@@ -6178,7 +5438,9 @@ class PortfolioHoldingDetail extends StatelessWidget {
                       .toList(),
                 ),
                 const SizedBox(height: 12),
-                points.isEmpty
+                pending
+                    ? const Text('Waiting for a verified share price.')
+                    : points.isEmpty
                     ? const EmptyState(
                         icon: Icons.show_chart,
                         text: 'No chart data available yet.',
@@ -6213,28 +5475,26 @@ class PortfolioHoldingDetail extends StatelessWidget {
                     ),
                     StockDetailValue(
                       label: 'Current value',
-                      value: moneyFormat.format(holding!.totalValue),
+                      value: portfolioAmount(holding!.totalValue),
                     ),
                     StockDetailValue(
                       label: 'Unrealized P/L',
-                      value: moneyFormat.format(holding!.profitLoss),
-                      positive: holding!.profitLoss >= 0,
+                      value: portfolioAmount(holding!.profitLoss),
+                      positive: holding!.profitLoss == null ? null : holding!.profitLoss! >= 0,
                     ),
                     StockDetailValue(
                       label: 'Current',
-                      value: stock?.lastPrice == null
-                          ? 'Not available'
-                          : moneyFormat.format(stock!.lastPrice),
+                      value: portfolioAmount(holding!.quantity > 0 ? holding!.currentPrice : stock?.lastPrice),
                     ),
                     StockDetailValue(
                       label: 'Opening',
-                      value: latest == null
+                      value: pending || latest == null
                           ? 'Not available'
                           : moneyFormat.format(latest.open),
                     ),
                     StockDetailValue(
                       label: 'Closing',
-                      value: latest == null
+                      value: pending || latest == null
                           ? 'Not available'
                           : moneyFormat.format(latest.close),
                     ),
@@ -6277,6 +5537,21 @@ class PortfolioHoldingDetail extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 18),
+                SectorValuationSection(
+                  symbol: holding!.symbol,
+                  load: api.sectorValuation,
+                ),
+                const SizedBox(height: 18),
+                EarningsFinancialsSection(
+                  key: ValueKey('financials-${holding!.symbol}'),
+                  symbol: holding!.symbol,
+                  data: detail?.financials ?? const FinancialsData(),
+                  reports: financialReportLinks(disclosures),
+                  onOpenReport: (url) => openExternalUrl(context, url),
+                  loading: loading,
+                  failed: snapshot.hasError,
+                ),
+                const SizedBox(height: 18),
                 Text(
                   'Dividend history',
                   style: Theme.of(context).textTheme.titleMedium,
@@ -6291,19 +5566,12 @@ class PortfolioHoldingDetail extends StatelessWidget {
                 else
                   ...dividends.map((item) => DividendTile(item: item)),
                 const SizedBox(height: 18),
-                Text(
-                  'Recent disclosures',
-                  style: Theme.of(context).textTheme.titleMedium,
+                DisclosureSection(
+                  key: ValueKey(holding!.symbol),
+                  filings: disclosures,
+                  offers: detail?.offers ?? const [],
+                  loading: loading,
                 ),
-                const SizedBox(height: 8),
-                if (disclosures.isEmpty)
-                  Text(
-                    loading
-                        ? 'Loading disclosures...'
-                        : 'No recent disclosures available.',
-                  )
-                else
-                  ...disclosures.map((item) => DisclosureTile(item: item)),
                 const SizedBox(height: 18),
                 Text(
                   'Company updates',
@@ -6440,6 +5708,80 @@ class DividendTile extends StatelessWidget {
   }
 }
 
+class _AsyncOffers extends StatelessWidget {
+  const _AsyncOffers({required this.future});
+  final Future<List<MarketOffer>> future;
+
+  @override
+  Widget build(BuildContext context) => FutureBuilder<List<MarketOffer>>(
+    future: future,
+    builder: (_, snapshot) => OfferPanel(offers: snapshot.data ?? const []),
+  );
+}
+
+class OfferPanel extends StatelessWidget {
+  const OfferPanel({super.key, required this.offers});
+  final List<MarketOffer> offers;
+
+  @override
+  Widget build(BuildContext context) {
+    if (offers.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('IPOs & share offers', style: Theme.of(context).textTheme.titleMedium),
+        for (final offer in offers)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.event_note_outlined),
+            title: Text(offer.name),
+            subtitle: Text([
+              offer.kind, offer.status,
+              if (offer.nextDate != null)
+                '${offer.status == 'Upcoming' ? 'Opens' : 'Closes'} ${DateFormat.yMMMd().format(offer.nextDate!)}',
+            ].join(' / ')),
+            trailing: const Icon(Icons.open_in_new, semanticLabel: 'View official offer'),
+            onTap: () => openExternalUrl(context, offer.url),
+          ),
+      ]),
+    );
+  }
+}
+
+class DisclosureSection extends StatefulWidget {
+  const DisclosureSection({super.key, required this.filings, required this.offers, required this.loading});
+  final List<DisclosureItem> filings;
+  final List<MarketOffer> offers;
+  final bool loading;
+
+  @override
+  State<DisclosureSection> createState() => _DisclosureSectionState();
+}
+
+class _DisclosureSectionState extends State<DisclosureSection> {
+  bool expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final filings = widget.filings;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      OfferPanel(offers: widget.offers),
+      Text('Recent disclosures', style: Theme.of(context).textTheme.titleMedium),
+      const SizedBox(height: 8),
+      if (filings.isEmpty)
+        Text(widget.loading ? 'Loading disclosures...' : 'No recent disclosures available.'),
+      for (final item in expanded ? filings : filings.take(3))
+        DisclosureTile(item: item),
+      if (filings.length > 3)
+        Align(alignment: Alignment.centerLeft, child: TextButton.icon(
+          icon: Icon(expanded ? Icons.expand_less : Icons.expand_more),
+          label: Text(expanded ? 'Show less' : 'View all (${filings.length})'),
+          onPressed: () => setState(() => expanded = !expanded),
+        )),
+    ]);
+  }
+}
+
 class DisclosureTile extends StatelessWidget {
   const DisclosureTile({super.key, required this.item});
 
@@ -6507,42 +5849,22 @@ class MarketNewsPanel extends StatelessWidget {
   const MarketNewsPanel({
     super.key,
     required this.title,
-    required this.subtitle,
     required this.news,
   });
 
   final String title;
-  final String subtitle;
   final List<MarketNewsItem> news;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              title,
-              style: theme.textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              subtitle,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 14),
-            ...news.map((item) => MarketNewsTile(item: item)),
-          ],
-        ),
-      ),
-    );
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Text(title, style: theme.textTheme.titleLarge),
+      const SizedBox(height: 8),
+      Material(color: theme.colorScheme.surface, child: Column(children: [
+        for (final item in news) ...[MarketNewsTile(item: item), const Divider(height: 1)],
+      ])),
+    ]);
   }
 }
 
@@ -6560,53 +5882,12 @@ class MarketNewsTile extends StatelessWidget {
       item.source,
       published,
     ].whereType<String>().where((value) => value.isNotEmpty).join(' - ');
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: InkWell(
-        onTap: item.url == null
-            ? null
-            : () => openExternalUrl(context, item.url!),
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: Theme.of(context).colorScheme.outlineVariant,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                item.title ?? 'Untitled market story',
-                style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  decoration: item.url == null
-                      ? TextDecoration.none
-                      : TextDecoration.underline,
-                ),
-              ),
-              if (sourceLine.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(sourceLine, style: Theme.of(context).textTheme.bodySmall),
-              ],
-              if ((item.summary ?? '').trim().isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Text(
-                  item.summary!,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 3),
+      title: Text(item.title ?? 'Market announcement', style: Theme.of(context).textTheme.titleSmall),
+      subtitle: sourceLine.isEmpty ? null : Text(sourceLine),
+      trailing: item.url == null ? null : const Icon(Icons.open_in_new, size: 16),
+      onTap: item.url == null ? null : () => openExternalUrl(context, item.url!),
     );
   }
 }
@@ -6823,6 +6104,7 @@ class _StocksScreenState extends State<StocksScreen> {
                   children: [
                     if (selectedStock != null) ...[
                       PortfolioHoldingDetail(
+                        api: widget.api,
                         holding: Holding.fromStock(selectedStock!),
                         detailFuture: selectedDetailFuture,
                         selectedRange: selectedDetailRange,
@@ -7009,13 +6291,6 @@ class _ChartsScreenState extends State<ChartsScreen> {
                 context,
               ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
             ),
-            const SizedBox(height: 4),
-            Text(
-              'Switch between quick trade windows and longer-term trend views using NGX Pulse price history. Candles show daily direction, and the touch crosshair exposes exact price levels.',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
@@ -7032,7 +6307,7 @@ class _ChartsScreenState extends State<ChartsScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              '${rangeDescription(selectedRange)}. Dividend history below the chart stays tied to the selected stock so you can review price action beside payout dates.',
+              rangeDescription(selectedRange),
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
@@ -8028,1083 +7303,34 @@ class ProfileAvatar extends StatelessWidget {
   }
 }
 
-class _PortfolioOverviewHero extends StatelessWidget {
-  const _PortfolioOverviewHero({
-    required this.totalValue,
-    required this.profitLoss,
-    required this.profitPercent,
-    required this.holdingCount,
-    required this.bestHolding,
-    required this.weakestHolding,
-    required this.hideFinancialValues,
-    required this.onToggleVisibility,
-  });
-
-  final double totalValue;
-  final double profitLoss;
-  final double profitPercent;
-  final int holdingCount;
-  final Holding? bestHolding;
-  final Holding? weakestHolding;
-  final bool hideFinancialValues;
-  final Future<void> Function() onToggleVisibility;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final positive = profitLoss >= 0;
-    final accent = positive
-        ? (theme.brightness == Brightness.dark
-              ? const Color(0xFF6AF0C1)
-              : _gainColor)
-        : (theme.brightness == Brightness.dark
-              ? const Color(0xFFFFA0B5)
-              : _lossColor);
-    final background = theme.brightness == Brightness.dark
-        ? const LinearGradient(
-            colors: [Color(0xFF0D2E33), Color(0xFF10251A), Color(0xFF161328)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          )
-        : const LinearGradient(
-            colors: [Color(0xFF041E42), Color(0xFF006F7A), Color(0xFF00A86B)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          );
-    return Container(
-      padding: const EdgeInsets.all(22),
-      decoration: BoxDecoration(
-        gradient: background,
-        borderRadius: BorderRadius.circular(28),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(
-              alpha: theme.brightness == Brightness.dark ? 0.22 : 0.14,
-            ),
-            blurRadius: 26,
-            offset: const Offset(0, 16),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: accent.withValues(alpha: 0.14),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Icon(
-                  Icons.account_balance_wallet_outlined,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Portfolio snapshot',
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '$holdingCount holdings across your active watchlist.',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: Colors.white.withValues(alpha: 0.78),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Chip(
-                label: Text(
-                  '${profitPercent.toStringAsFixed(2)}%',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                backgroundColor: accent.withValues(alpha: 0.28),
-                side: BorderSide(color: accent.withValues(alpha: 0.42)),
-              ),
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
-                onPressed: onToggleVisibility,
-                tooltip: hideFinancialValues ? 'Reveal totals' : 'Hide totals',
-                icon: Icon(
-                  hideFinancialValues
-                      ? Icons.visibility_outlined
-                      : Icons.visibility_off_outlined,
-                ),
-                style: IconButton.styleFrom(
-                  backgroundColor: Colors.white.withValues(alpha: 0.12),
-                  foregroundColor: Colors.white,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 22),
-          Text(
-            hideFinancialValues ? '*****' : moneyFormat.format(totalValue),
-            style: theme.textTheme.headlineMedium?.copyWith(
-              fontWeight: FontWeight.w800,
-              color: Colors.white,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            hideFinancialValues
-                ? '***** unrealized ${positive ? 'gain' : 'loss'}'
-                : '${positive ? '+' : '-'}${moneyFormat.format(profitLoss.abs())} unrealized ${positive ? 'gain' : 'loss'}',
-            style: theme.textTheme.titleMedium?.copyWith(
-              color: accent,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 18),
-          Wrap(
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              _HeroInfoPill(
-                icon: Icons.rocket_launch_outlined,
-                label: 'Best today',
-                value: bestHolding == null
-                    ? '-'
-                    : '${bestHolding!.symbol} ${(bestHolding!.profitLossPercent ?? 0).toStringAsFixed(2)}%',
-              ),
-              _HeroInfoPill(
-                icon: Icons.remove_red_eye_outlined,
-                label: 'Watch closely',
-                value: weakestHolding == null
-                    ? '-'
-                    : '${weakestHolding!.symbol} ${(weakestHolding!.profitLossPercent ?? 0).toStringAsFixed(2)}%',
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _HeroInfoPill extends StatelessWidget {
-  const _HeroInfoPill({
-    required this.icon,
-    required this.label,
-    required this.value,
-  });
-
-  final IconData icon;
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      constraints: const BoxConstraints(minWidth: 190),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(
-          alpha: theme.brightness == Brightness.dark ? 0.08 : 0.14,
-        ),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 18, color: Colors.white),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: Colors.white.withValues(alpha: 0.72),
-                  ),
-                ),
-                Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class MetricCard extends StatelessWidget {
-  const MetricCard({
-    super.key,
-    required this.label,
-    required this.value,
-    required this.icon,
-    this.positive,
-    this.onTap,
-  });
-
-  final String label;
-  final String value;
-  final IconData icon;
-  final bool? positive;
-  final Future<void> Function()? onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = positive == null
-        ? theme.colorScheme.primary
-        : (positive! ? _gainColor : _lossColor);
-    return SizedBox(
-      width: 260,
-      child: Card(
-        child: InkWell(
-          onTap: onTap == null ? null : () => onTap!.call(),
-          borderRadius: BorderRadius.circular(12),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  backgroundColor: color.withValues(alpha: 0.12),
-                  child: Icon(icon, color: color),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        label,
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          value,
-                          style: theme.textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class MarketLeadersSlideshow extends StatefulWidget {
-  const MarketLeadersSlideshow({
-    super.key,
-    required this.movers,
-    required this.losers,
-    this.onStockTap,
-  });
-
-  final List<Stock> movers;
-  final List<Stock> losers;
-  final ValueChanged<Stock>? onStockTap;
-
-  @override
-  State<MarketLeadersSlideshow> createState() => _MarketLeadersSlideshowState();
-}
-
-class _MarketLeadersSlideshowState extends State<MarketLeadersSlideshow> {
-  late final PageController _pageController = PageController();
-  Timer? _slideTimer;
-  int _pageIndex = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _configureTimer();
-  }
-
-  @override
-  void didUpdateWidget(covariant MarketLeadersSlideshow oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.movers.length != widget.movers.length ||
-        oldWidget.losers.length != widget.losers.length) {
-      _configureTimer();
-    }
-  }
-
-  @override
-  void dispose() {
-    _slideTimer?.cancel();
-    _pageController.dispose();
-    super.dispose();
-  }
-
-  void _configureTimer() {
-    _slideTimer?.cancel();
-    if (widget.movers.isEmpty || widget.losers.isEmpty) return;
-    _slideTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      if (!mounted) return;
-      final next = (_pageIndex + 1) % 2;
-      _pageController.animateToPage(
-        next,
-        duration: const Duration(milliseconds: 520),
-        curve: Curves.easeInOutCubic,
-      );
-      setState(() => _pageIndex = next);
-    });
-  }
-
-  void _onPageChanged(int value) {
-    if (!mounted) return;
-    setState(() => _pageIndex = value);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final pages = [
-      (
-        title: 'Top gainers',
-        icon: Icons.local_fire_department_outlined,
-        stocks: widget.movers,
-        positive: true,
-      ),
-      (
-        title: 'Top losers',
-        icon: Icons.trending_down_outlined,
-        stocks: widget.losers,
-        positive: false,
-      ),
-    ];
-    final theme = Theme.of(context);
-    final screenWidth = MediaQuery.sizeOf(context).width;
-    final maxStocks = pages.fold<int>(
-      0,
-      (best, page) => max(best, page.stocks.length),
-    );
-    final estimatedRows = screenWidth < 430
-        ? maxStocks
-        : (maxStocks / 2).ceil();
-    final slideHeight = (380 + (estimatedRows * 56)).clamp(460, 660).toDouble();
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(
-                  'Market leaders',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Tap any stock card to open details.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 14),
-            SizedBox(
-              height: slideHeight,
-              child: PageView.builder(
-                controller: _pageController,
-                onPageChanged: _onPageChanged,
-                itemCount: pages.length,
-                itemBuilder: (context, index) {
-                  final page = pages[index];
-                  return Padding(
-                    padding: EdgeInsets.only(
-                      right: index == 0 ? 12 : 0,
-                      left: index == 1 ? 12 : 0,
-                    ),
-                    child: MarketLeaderPanel(
-                      title: page.title,
-                      icon: page.icon,
-                      stocks: page.stocks,
-                      positive: page.positive,
-                      onStockTap: widget.onStockTap,
-                    ),
-                  );
-                },
-              ),
-            ),
-            const SizedBox(height: 14),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                for (var i = 0; i < pages.length; i++) ...[
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 220),
-                    width: i == _pageIndex ? 22 : 8,
-                    height: 8,
-                    decoration: BoxDecoration(
-                      color: i == _pageIndex
-                          ? theme.colorScheme.primary
-                          : theme.colorScheme.primary.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                  ),
-                  if (i != pages.length - 1) const SizedBox(width: 6),
-                ],
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class MarketLeaderPanel extends StatefulWidget {
-  const MarketLeaderPanel({
-    super.key,
-    required this.title,
-    required this.icon,
-    required this.stocks,
-    required this.positive,
-    this.onStockTap,
-  });
-
-  final String title;
-  final IconData icon;
-  final List<Stock> stocks;
-  final bool positive;
-  final ValueChanged<Stock>? onStockTap;
-
-  @override
-  State<MarketLeaderPanel> createState() => _MarketLeaderPanelState();
-}
-
-class _MarketLeaderPanelState extends State<MarketLeaderPanel> {
-  int _activeIndex = 0;
-
-  @override
-  void didUpdateWidget(covariant MarketLeaderPanel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.stocks.length != widget.stocks.length ||
-        !_sameStockSequence(oldWidget.stocks, widget.stocks)) {
-      _activeIndex = 0;
-    }
-  }
-
-  bool _sameStockSequence(List<Stock> previous, List<Stock> next) {
-    if (previous.length != next.length) return false;
-    for (var i = 0; i < previous.length; i++) {
-      if (previous[i].symbol != next[i].symbol) return false;
-    }
-    return true;
-  }
-
-  void _selectIndex(int value) {
-    if (value < 0 || value >= widget.stocks.length || value == _activeIndex) {
-      return;
-    }
-    setState(() => _activeIndex = value);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final color = widget.positive ? _gainColor : _lossColor;
-    final cardGradient = widget.positive
-        ? (theme.brightness == Brightness.dark
-              ? const LinearGradient(
-                  colors: [Color(0xFF0D2C27), Color(0xFF123E35)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                )
-              : const LinearGradient(
-                  colors: [Color(0xFFE7FFF5), Color(0xFFD9FFF0)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ))
-        : (theme.brightness == Brightness.dark
-              ? const LinearGradient(
-                  colors: [Color(0xFF321822), Color(0xFF22141F)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                )
-              : const LinearGradient(
-                  colors: [Color(0xFFFFEEF3), Color(0xFFFFE4EB)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ));
-    final stocks = widget.stocks;
-    final activeIndex = stocks.isEmpty
-        ? 0
-        : _activeIndex.clamp(0, stocks.length - 1);
-    final activeStock = stocks.isEmpty ? null : stocks[activeIndex];
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(widget.icon, color: color),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    widget.title,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              stocks.length > 1
-                  ? 'Tap any ticker below to switch focus and open details.'
-                  : 'Tap to open details.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 14),
-            if (activeStock == null)
-              const Text('No market leaders available yet.')
-            else
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 550),
-                switchInCurve: Curves.easeOutCubic,
-                switchOutCurve: Curves.easeInCubic,
-                transitionBuilder: (child, animation) => FadeTransition(
-                  opacity: animation,
-                  child: SlideTransition(
-                    position: Tween<Offset>(
-                      begin: const Offset(0.08, 0),
-                      end: Offset.zero,
-                    ).animate(animation),
-                    child: child,
-                  ),
-                ),
-                child: InkWell(
-                  key: ValueKey('${widget.title}-${activeStock.symbol}'),
-                  onTap: widget.onStockTap == null
-                      ? null
-                      : () => widget.onStockTap!(activeStock),
-                  borderRadius: BorderRadius.circular(24),
-                  child: Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      gradient: cardGradient,
-                      borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: color.withValues(alpha: 0.22)),
-                      boxShadow: [
-                        BoxShadow(
-                          color: color.withValues(alpha: 0.1),
-                          blurRadius: 20,
-                          offset: const Offset(0, 12),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      children: [
-                        Row(
-                          children: [
-                            CompanyLogo(symbol: activeStock.symbol, size: 44),
-                            const SizedBox(width: 14),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    activeStock.symbol,
-                                    style: theme.textTheme.titleLarge?.copyWith(
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    activeStock.name ?? activeStock.symbol,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: theme.textTheme.bodyMedium?.copyWith(
-                                      color: theme.colorScheme.onSurfaceVariant,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 16),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: _LeaderValueChip(
-                                label: 'Last price',
-                                value: activeStock.lastPrice == null
-                                    ? 'No price'
-                                    : moneyFormat.format(activeStock.lastPrice),
-                                accent: color,
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: _LeaderValueChip(
-                                label: 'Change',
-                                value:
-                                    '${activeStock.percentChange?.toStringAsFixed(2) ?? '0.00'}%',
-                                accent: color,
-                                positive: (activeStock.percentChange ?? 0) >= 0,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            if (stocks.length > 1) ...[
-              const SizedBox(height: 14),
-              Wrap(
-                spacing: 8,
-                runSpacing: 10,
-                children: [
-                  for (var i = 0; i < stocks.length; i++)
-                    _LeaderTickerChip(
-                      stock: stocks[i],
-                      selected: i == activeIndex,
-                      accent: color,
-                      onTap: () => _selectIndex(i),
-                    ),
-                ],
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _LeaderValueChip extends StatelessWidget {
-  const _LeaderValueChip({
-    required this.label,
-    required this.value,
-    required this.accent,
-    this.positive,
-  });
-
-  final String label;
-  final String value;
-  final Color accent;
-  final bool? positive;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface.withValues(alpha: 0.8),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: accent.withValues(alpha: 0.16)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-          const SizedBox(height: 4),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (positive != null) ...[
-                  Icon(
-                    trendDirectionIcon(positive!),
-                    size: 20,
-                    color: trendDirectionColor(positive!),
-                  ),
-                  const SizedBox(width: 6),
-                ],
-                Text(
-                  value,
-                  maxLines: 1,
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    color: accent,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _LeaderTickerChip extends StatelessWidget {
-  const _LeaderTickerChip({
-    required this.stock,
-    required this.selected,
-    required this.accent,
-    required this.onTap,
-  });
-
-  final Stock stock;
-  final bool selected;
-  final Color accent;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(999),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 250),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-        decoration: BoxDecoration(
-          color: selected
-              ? accent.withValues(alpha: 0.14)
-              : theme.colorScheme.surface,
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(
-            color: selected
-                ? accent.withValues(alpha: 0.42)
-                : theme.colorScheme.outlineVariant,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              stock.symbol,
-              style: theme.textTheme.labelLarge?.copyWith(
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(width: 8),
-            Icon(
-              trendDirectionIcon((stock.percentChange ?? 0) >= 0),
-              size: 20,
-              color: trendDirectionColor((stock.percentChange ?? 0) >= 0),
-            ),
-            const SizedBox(width: 4),
-            Text(
-              '${stock.percentChange?.toStringAsFixed(2) ?? '0.00'}%',
-              style: theme.textTheme.labelMedium?.copyWith(
-                color: accent,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class MarketIdeasPanel extends StatelessWidget {
   const MarketIdeasPanel({super.key, required this.bundle, this.emptyMessage});
-
   final MarketIdeasBundle bundle;
   final String? emptyMessage;
-
   @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(Icons.insights_outlined, color: theme.colorScheme.primary),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Potential buy setups',
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Analyzing ${bundle.stocksAnalyzed} NGX stocks',
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              bundle.disclaimer,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: 14),
-            if (bundle.ideas.isEmpty)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      theme.colorScheme.primaryContainer.withValues(alpha: 0.9),
-                      theme.colorScheme.secondaryContainer.withValues(
-                        alpha: 0.72,
-                      ),
-                    ],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(
-                    color: theme.colorScheme.primary.withValues(alpha: 0.12),
-                  ),
-                ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(
-                      Icons.auto_graph_rounded,
-                      color: theme.colorScheme.primary,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        emptyMessage ??
-                            'Potential buy setups will appear here as soon as the synced market data surfaces a strong candidate.',
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              )
-            else
-              ...bundle.ideas.map(
-                (idea) => Padding(
-                  padding: const EdgeInsets.only(bottom: 12),
-                  child: Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          theme.colorScheme.surfaceContainerHighest.withValues(
-                            alpha: 0.92,
-                          ),
-                          theme.colorScheme.primaryContainer.withValues(
-                            alpha: 0.2,
-                          ),
-                        ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: theme.colorScheme.outlineVariant,
-                      ),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 10,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          children: [
-                            ConstrainedBox(
-                              constraints: const BoxConstraints(
-                                minWidth: 180,
-                                maxWidth: 360,
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    idea.stock.symbol,
-                                    style: theme.textTheme.titleSmall?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  if ((idea.stock.name ?? '').isNotEmpty)
-                                    Text(
-                                      idea.stock.name!,
-                                      style: theme.textTheme.bodySmall
-                                          ?.copyWith(
-                                            color: theme
-                                                .colorScheme
-                                                .onSurfaceVariant,
-                                          ),
-                                    ),
-                                ],
-                              ),
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 6,
-                              ),
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  colors: [
-                                    theme.colorScheme.primaryContainer,
-                                    theme.colorScheme.secondaryContainer,
-                                  ],
-                                ),
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              child: Text(
-                                'Score ${idea.score.toStringAsFixed(1)}',
-                                style: theme.textTheme.labelMedium?.copyWith(
-                                  color: theme.colorScheme.onPrimaryContainer,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                            if (idea.priceToEarningsRatio != null &&
-                                idea.priceToEarningsRatio!.isFinite &&
-                                idea.priceToEarningsRatio! > 0)
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: theme.colorScheme.surface,
-                                  borderRadius: BorderRadius.circular(999),
-                                  border: Border.all(
-                                    color: theme.colorScheme.outlineVariant,
-                                  ),
-                                ),
-                                child: Text(
-                                  'P/E ${idea.priceToEarningsRatio!.toStringAsFixed(1)}',
-                                  style: theme.textTheme.labelMedium?.copyWith(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 10),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: idea.rationale
-                              .map(
-                                (reason) => Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 6,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: theme.colorScheme.surface.withValues(
-                                      alpha: 0.96,
-                                    ),
-                                    borderRadius: BorderRadius.circular(999),
-                                    border: Border.all(
-                                      color: theme.colorScheme.secondary
-                                          .withValues(alpha: 0.22),
-                                    ),
-                                  ),
-                                  child: Text(
-                                    reason,
-                                    style: theme.textTheme.labelMedium,
-                                    softWrap: true,
-                                  ),
-                                ),
-                              )
-                              .toList(),
-                        ),
-                        if (idea.webSummary != null &&
-                            idea.webSummary!.isNotEmpty) ...[
-                          const SizedBox(height: 10),
-                          Text(
-                            'Latest company update',
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            idea.webSummary!,
-                            style: theme.textTheme.bodyMedium,
-                          ),
-                        ],
-                        if (idea.fundamentalNote != null &&
-                            idea.fundamentalNote!.isNotEmpty) ...[
-                          const SizedBox(height: 10),
-                          Text(
-                            idea.fundamentalNote!,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: theme.colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
+  Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+    Text('Market ideas', style: Theme.of(context).textTheme.titleLarge),
+    Text('${bundle.stocksAnalyzed} stocks analysed', style: Theme.of(context).textTheme.bodySmall),
+    const SizedBox(height: 8),
+    if (bundle.ideas.isEmpty) Text(emptyMessage ?? 'No qualifying stocks.')
+    else Material(color: Theme.of(context).colorScheme.surface, child: Column(children: [
+      for (final idea in bundle.ideas) ExpansionTile(
+        key: PageStorageKey('idea-${idea.stock.symbol}'), leading: CompanyLogo(symbol: idea.stock.symbol, size: 32, useInitials: true),
+        title: Text(idea.stock.symbol), subtitle: Text(idea.stock.name ?? ''),
+        trailing: Text('Score ${idea.score.toStringAsFixed(1)}'),
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (idea.priceToEarningsRatio != null) Text('P/E  ${idea.priceToEarningsRatio!.toStringAsFixed(1)}'),
+          for (final reason in idea.rationale) Text(reason),
+          if ((idea.webSummary ?? '').isNotEmpty) Text(idea.webSummary!),
+          if ((idea.fundamentalNote ?? '').isNotEmpty) Text(idea.fundamentalNote!),
+        ],
       ),
-    );
-  }
+    ])),
+    const SizedBox(height: 8),
+    Text(bundle.disclaimer, style: Theme.of(context).textTheme.bodySmall),
+  ]);
 }
 
 class StockTile extends StatelessWidget {
@@ -9123,146 +7349,31 @@ class StockTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final change = stock.percentChange ?? 0;
-    final changeColor = change >= 0
-        ? Colors.green.shade700
-        : Colors.red.shade700;
-    final colorScheme = Theme.of(context).colorScheme;
-    return Card(
-      color: selected
-          ? colorScheme.primaryContainer.withValues(alpha: 0.35)
-          : null,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          if (constraints.maxWidth < 620) {
-            return InkWell(
-              onTap: onTap,
-              borderRadius: BorderRadius.circular(8),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        CompanyLogo(symbol: stock.symbol),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                stock.symbol,
-                                style: Theme.of(context).textTheme.titleMedium,
-                              ),
-                              Text(
-                                '${stock.name ?? stock.symbol}${stock.sector == null ? '' : ' - ${stock.sector}'}',
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ),
-                        ),
-                        IconButton.filledTonal(
-                          tooltip: 'Add to portfolio',
-                          onPressed: onAdd,
-                          icon: const Icon(Icons.add),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 18,
-                      runSpacing: 8,
-                      children: [
-                        StockDetailValue(
-                          label: 'Price',
-                          value: stock.lastPrice == null
-                              ? 'No price'
-                              : moneyFormat.format(stock.lastPrice),
-                        ),
-                        StockDetailValue(
-                          label: 'Change',
-                          value: '${change.toStringAsFixed(2)}%',
-                          positive: change >= 0,
-                        ),
-                        StockDetailValue(
-                          label: 'Margin',
-                          value: '${(stock.margin ?? 0).toStringAsFixed(2)}%',
-                        ),
-                        StockDetailValue(
-                          label: 'Volume',
-                          value: stock.volume == null
-                              ? '-'
-                              : compactFormat.format(stock.volume),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-
-          return ListTile(
-            onTap: onTap,
-            leading: CompanyLogo(symbol: stock.symbol),
-            title: Text(stock.symbol),
-            subtitle: Text(
-              '${stock.name ?? stock.symbol}${stock.sector == null ? '' : ' - ${stock.sector}'}',
-            ),
-            trailing: Wrap(
-              spacing: 18,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      stock.lastPrice == null
-                          ? 'No price'
-                          : moneyFormat.format(stock.lastPrice),
-                    ),
-                    Text(
-                      '${change.toStringAsFixed(2)}%',
-                      style: TextStyle(
-                        color: changeColor,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ],
-                ),
-                Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    const Text('Margin'),
-                    Text('${(stock.margin ?? 0).toStringAsFixed(2)}%'),
-                  ],
-                ),
-                Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    const Text('Volume'),
-                    Text(
-                      stock.volume == null
-                          ? '-'
-                          : compactFormat.format(stock.volume),
-                    ),
-                  ],
-                ),
-                IconButton.filledTonal(
-                  tooltip: 'Add to portfolio',
-                  onPressed: onAdd,
-                  icon: const Icon(Icons.add),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
+    final theme = Theme.of(context);
+    return Material(color: selected ? theme.colorScheme.primaryContainer : theme.colorScheme.surface,
+      child: Column(children: [
+        InkWell(onTap: onTap, child: Padding(padding: const EdgeInsets.symmetric(horizontal:12, vertical:8),
+          child: LayoutBuilder(builder: (_, box) {
+            final stats = 'Margin ${stock.margin == null ? 'N/A' : portfolioPercent(stock.margin)}   ·   Vol ${stock.volume == null ? 'N/A' : compactFormat.format(stock.volume)}';
+            return Row(children: [
+              CompanyLogo(symbol: stock.symbol, size: 32, useInitials: true), const SizedBox(width: 10),
+              Expanded(flex: 3, child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(stock.symbol, style: theme.textTheme.titleSmall),
+                Text([stock.name,stock.sector].whereType<String>().join(' · '), style: theme.textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+                if (box.maxWidth < 640) Text(stats, style: theme.textTheme.labelSmall),
+              ])),
+              if (box.maxWidth >= 640) Expanded(flex: 2, child: Text(stats, style: theme.textTheme.bodySmall)),
+              const SizedBox(width: 8),
+              Expanded(flex: 2, child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                FittedBox(fit: BoxFit.scaleDown, child: Text(_amount(stock.lastPrice))),
+                _HoldingReturn(stock.percentChange),
+              ])),
+              IconButton(tooltip: 'Add to portfolio', onPressed: onAdd, icon: const Icon(Icons.add)),
+            ]);
+          }),
+        )),
+        const Divider(height: 1),
+      ]),
     );
   }
 }

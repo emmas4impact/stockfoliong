@@ -1,6 +1,7 @@
 from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from .financials import FinancialsOut
 
 
 class RegisterRequest(BaseModel):
@@ -130,9 +131,9 @@ class HoldingOut(BaseModel):
     quantity: float
     avg_purchase_price: float
     current_price: float | None = None
-    total_value: float
+    total_value: float | None
     total_cost: float
-    profit_loss: float
+    profit_loss: float | None
     profit_loss_percent: float | None = None
     notes: str | None = None
 
@@ -223,7 +224,17 @@ class MarketNewsOut(BaseModel):
     image_url: str | None = None
 
 
+class MarketOfferOut(BaseModel):
+    name: str
+    symbol: str | None = None
+    kind: str
+    status: str
+    next_date: date | None = None
+    url: str
+
+
 class StockDetailOut(BaseModel):
+    financials: FinancialsOut = Field(default_factory=FinancialsOut)
     stock: StockOut
     history: list[StockPriceOut]
     market_snapshot: MarketSnapshotOut | None = None
@@ -231,6 +242,7 @@ class StockDetailOut(BaseModel):
     news: list[CompanyNewsOut] = []
     dividends: list[DividendHistoryOut] = []
     disclosures: list[DisclosureOut] = []
+    offers: list[MarketOfferOut] = []
 
 
 class MarketLeadersOut(BaseModel):

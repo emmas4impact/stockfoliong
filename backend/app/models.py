@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -48,6 +48,7 @@ class Stock(TimestampMixin, Base):
     ngx_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     sector: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
+    unit_price_field: Mapped[str | None] = mapped_column(String(32), nullable=True)
     previous_close: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     open_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     high_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
@@ -83,6 +84,38 @@ class StockPrice(TimestampMixin, Base):
     volume: Mapped[float | None] = mapped_column(Numeric(20, 2), nullable=True)
 
     stock: Mapped[Stock] = relationship(back_populates="prices")
+
+
+class FundamentalObservation(Base):
+    __tablename__ = "fundamental_observations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    observation_key: Mapped[str] = mapped_column(String(64), unique=True)
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source: Mapped[str] = mapped_column(String(64))
+    inputs: Mapped[dict] = mapped_column(JSON)
+
+
+class FinancialStatement(TimestampMixin, Base):
+    __tablename__ = "financial_statements"
+
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), primary_key=True)
+    period_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+
+class StockAnalysis(Base):
+    __tablename__ = "stock_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    analysis_key: Mapped[str] = mapped_column(String(64), unique=True)
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), index=True)
+    observation_id: Mapped[int] = mapped_column(ForeignKey("fundamental_observations.id"))
+    model_version: Mapped[str] = mapped_column(String(64))
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict] = mapped_column(JSON)
 
 
 class SyncLog(TimestampMixin, Base):

@@ -1,4 +1,5 @@
 import json
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, select
@@ -10,8 +11,10 @@ from .ngx_client import (
     NgxFetchError,
     clear_runtime_caches,
     fetch_all_stocks_from_ngx,
+    fetch_all_stocks_from_ngx_cached,
+    fetch_kobo_fundamentals,
     fetch_company_news_cached,
-    fetch_disclosures_cached,
+    fetch_disclosure_feed,
     fetch_dividend_history_cached,
     fetch_historical_prices_cached,
     fetch_market_snapshot_from_ngx,
@@ -22,6 +25,7 @@ from .ngx_client import (
 )
 from .settings import get_settings
 from .schemas import HoldingUpsert
+from .analysis import record_observation, archive_sync_analysis
 
 
 def upsert_stock(db: Session, stock_data: dict) -> Stock:
@@ -30,8 +34,13 @@ def upsert_stock(db: Session, stock_data: dict) -> Stock:
         stock = Stock(symbol=stock_data["symbol"])
         db.add(stock)
 
+    # A new quote must not inherit yesterday's (possibly corrupted) comparison
+    # prices or returns. Keep the existing carry-forward policy for metadata.
+    quote_fields = {"previous_close", "open_price", "high_price", "low_price",
+                    "change", "percent_change", "margin"}
+    fresh_quote = stock_data.get("source") in {"ngx_doclib", "ngxpulse"} and stock_data.get("last_price") is not None
     for field, value in stock_data.items():
-        if hasattr(stock, field) and value is not None:
+        if hasattr(stock, field) and (value is not None or (fresh_quote and field in quote_fields)):
             setattr(stock, field, value)
     db.flush()
     return stock
@@ -55,8 +64,7 @@ def dividend_cache_key(symbol: str, limit: int = 10) -> str:
     return f"dividends:{symbol.strip().upper()}:{limit}"
 
 
-def disclosure_cache_key(symbol: str, limit: int = 8) -> str:
-    return f"disclosures:{symbol.strip().upper()}:{limit}"
+DISCLOSURE_FEED_KEY = "kobo_disclosures"
 
 
 def record_sync_log(
@@ -114,9 +122,32 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
             db.commit()
             return "database_cache", 0, 0, "warning", message
 
+    enrichment_message = None
+    if source == "ngxpulse":
+        try:
+            fundamentals = fetch_kobo_fundamentals()
+        except NgxFetchError as exc:
+            enrichment_message = f"{exc} Continuing with stock-list data."
+            record_sync_log(db, status="warning", source="kobo_fundamentals", message=enrichment_message)
+        else:
+            matches = 0
+            trailing_pe_count = 0
+            for quote in stocks:
+                metrics = fundamentals.get(quote["symbol"])
+                if metrics is None:
+                    continue
+                matches += 1
+                quote["fundamentals"] = metrics
+                if metrics["pe_ratio"] is not None:
+                    quote["pe_ratio"] = metrics["pe_ratio"]
+                    trailing_pe_count += 1
+            enrichment_message = (f"Kobo fundamentals matched {matches}/{len(stocks)} stocks; "
+                                  f"{trailing_pe_count} supplied a numeric trailing P/E.")
+
     history_count = 0
     for stock_data in stocks:
         stock = upsert_stock(db, stock_data)
+        record_observation(db, stock_data)
         if include_history and (settings.ngxpulse_enabled or stock.ngx_id):
             history_count += upsert_stock_history(
                 db,
@@ -126,12 +157,14 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
             )
         history_count += upsert_daily_stock_snapshot(db, stock)
 
+    archive_sync_analysis(db)
     record_sync_log(
         db,
         status="success",
         source=source,
         stocks_upserted=len(stocks),
         history_rows_upserted=history_count,
+        message=enrichment_message,
     )
     if settings.ngxpulse_enabled:
         try:
@@ -152,7 +185,7 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
             refresh_market_status(db)
     db.commit()
     clear_runtime_caches()
-    return source, len(stocks), history_count, "success", None
+    return source, len(stocks), history_count, "success", enrichment_message
 
 
 def sync_status(db: Session) -> dict:
@@ -339,20 +372,13 @@ def get_cached_disclosures(
     db: Session,
     symbol: str,
     limit: int = 8,
-    *,
-    refresh_if_missing: bool = True,
 ) -> list[dict]:
-    cache_key = disclosure_cache_key(symbol, limit)
-    cached = get_cached_list_payload(db, cache_key)
-    if cached or not refresh_if_missing:
-        return cached
     try:
-        disclosures = fetch_disclosures_cached(symbol, limit)
+        feed = fetch_disclosure_feed()
     except NgxFetchError:
-        return []
-    cache_api_payload(db, cache_key=cache_key, payload=disclosures, source="ngxpulse_disclosures")
-    db.commit()
-    return disclosures
+        feed = get_cached_list_payload(db, DISCLOSURE_FEED_KEY)
+    symbol = symbol.strip().upper()
+    return [row for row in feed if row["symbol"] == symbol][:limit]
 
 
 def upsert_stock_history(
@@ -453,14 +479,19 @@ def upsert_daily_stock_snapshot(db: Session, stock: Stock) -> int:
     return 1
 
 
-def holding_to_dict(holding: PortfolioHolding) -> dict:
-    current_price = float(holding.stock.last_price) if holding.stock and holding.stock.last_price is not None else None
+def holding_to_dict(holding: PortfolioHolding, *, fallback_price: float | None = None) -> dict:
+    stock = holding.stock
+    # Pre-fix Kobo rows may contain turnover; wait for a normalized price on resync.
+    usable = stock and stock.last_price is not None and stock.last_price > 0 and (
+        stock.source != "ngxpulse" or stock.unit_price_field is not None
+    )
+    current_price = float(stock.last_price) if usable else fallback_price
     quantity = float(holding.quantity)
     avg_price = float(holding.avg_purchase_price)
     total_cost = quantity * avg_price
-    total_value = quantity * (current_price or 0)
-    profit_loss = total_value - total_cost
-    profit_loss_percent = (profit_loss / total_cost * 100) if total_cost else None
+    total_value = quantity * current_price if current_price is not None else None
+    profit_loss = total_value - total_cost if total_value is not None else None
+    profit_loss_percent = (profit_loss / total_cost * 100) if profit_loss is not None and total_cost else None
 
     return {
         "stock_symbol": holding.stock_symbol,
@@ -476,6 +507,24 @@ def holding_to_dict(holding: PortfolioHolding) -> dict:
     }
 
 
+def price_holdings(holdings: Sequence[PortfolioHolding]) -> list[dict]:
+    rows = [holding_to_dict(h) for h in holdings]
+    missing = {h.stock_symbol for h, row in zip(holdings, rows)
+               if row["current_price"] is None and h.stock and h.stock.source in {"ngxpulse", "ngx_doclib"}}
+    if not missing:
+        return rows
+
+    # A corrected live quote can precede the next persisted sync. Only accept
+    # the same per-share fields that the ingest parser has already verified.
+    try:
+        quotes = {q["symbol"]: q["last_price"] for q in fetch_all_stocks_from_ngx_cached()
+                  if q["symbol"] in missing and q.get("unit_price_field") and q.get("last_price") is not None}
+    except NgxFetchError:
+        return rows
+    return [holding_to_dict(h, fallback_price=quotes[h.stock_symbol]) if h.stock_symbol in quotes else row
+            for h, row in zip(holdings, rows)]
+
+
 def upsert_holding(db: Session, user: User, payload: HoldingUpsert) -> PortfolioHolding:
     symbol = payload.stock_symbol.strip().upper()
     stock = db.get(Stock, symbol)
@@ -487,6 +536,7 @@ def upsert_holding(db: Session, user: User, payload: HoldingUpsert) -> Portfolio
         stock.name = payload.manual_name
     if payload.manual_current_price is not None:
         stock.last_price = payload.manual_current_price
+        stock.unit_price_field = "manual"
         stock.source = "manual"
 
     holding = db.scalar(
@@ -602,6 +652,14 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
                 message=f"Market news cache refresh failed: {exc}",
             )
 
+    if get_settings().ngxpulse_enabled:
+        try:
+            cache_api_payload(db, cache_key=DISCLOSURE_FEED_KEY, payload=fetch_disclosure_feed(),
+                              source="kobo_disclosures")
+            cache_entries += 1
+        except NgxFetchError as exc:
+            record_sync_log(db, status="warning", source=REFERENCE_CACHE_SYNC_SOURCE, message=str(exc))
+
     for stock in stocks:
         if stock.supports_history:
             history_rows += upsert_stock_history(
@@ -619,16 +677,6 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
                 cache_key=dividend_cache_key(stock.symbol, 10),
                 payload=fetch_dividend_history_cached(stock.symbol, 10),
                 source="ngxpulse_dividends",
-            )
-            cache_entries += 1
-        except NgxFetchError:
-            pass
-        try:
-            cache_api_payload(
-                db,
-                cache_key=disclosure_cache_key(stock.symbol, 8),
-                payload=fetch_disclosures_cached(stock.symbol, 8),
-                source="ngxpulse_disclosures",
             )
             cache_entries += 1
         except NgxFetchError:

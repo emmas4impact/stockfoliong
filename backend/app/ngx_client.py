@@ -1,11 +1,12 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from html import unescape
+import math
 import re
 from threading import Lock
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -177,21 +178,20 @@ def normalize_stock(raw: dict[str, Any], source: str) -> dict[str, Any] | None:
         return None
 
     symbol_text = str(symbol).strip().upper()
-    last_price = _number(
-        _first(
-            raw,
-            [
-                "Value",
-                "last_price",
-                "lastPrice",
-                "price",
-                "currentPrice",
-                "current_price",
-                "close",
-                "Close",
-            ],
-        )
-    )
+    # Doclib's ticker Value is a unit price. Kobo's value is not a quote.
+    price_fields = ["current_price", "currentPrice", "last_price", "lastPrice",
+                    "price", "close_price", "closing_price", "close"]
+    if source == "ngx_doclib":
+        price_fields.insert(0, "Value")
+    last_price = None
+    for field in price_fields:
+        value = _first(raw, [field])
+        price = None if isinstance(value, bool) else _number(value)
+        if price is not None and math.isfinite(price) and price > 0:
+            last_price = price
+            break
+    if last_price is None:
+        return None
     previous_close = _number(_first(raw, ["previous_close", "previousClose", "pclose", "prevClose"]))
     raw_absolute_change = _number(
         _first(raw, ["Change", "change", "change_amount", "changeAmount", "price_change", "absolute_change"])
@@ -277,6 +277,7 @@ def normalize_stock(raw: dict[str, Any], source: str) -> dict[str, Any] | None:
         "ngx_id": ngx_id,
         "sector": _first(raw, ["Sector", "sector"]),
         "last_price": last_price,
+        "unit_price_field": field,
         "previous_close": previous_close,
         "open_price": open_price,
         "high_price": high_price,
@@ -325,11 +326,56 @@ def _fetch_all_stocks_from_ngxpulse() -> list[dict[str, Any]]:
                 f"NGX Pulse stocks response did not include an equities list. Payload keys: {payload_keys or 'none'}."
             )
         raise NgxFetchError("NGX Pulse stocks response did not include an equities list.")
-    return [
+    stocks = [
         stock
         for item in results
         if isinstance(item, dict) and (stock := normalize_stock(item, "ngxpulse"))
     ]
+    if not stocks:
+        raise NgxFetchError("NGX Pulse returned no equities with a usable per-share price.")
+    return stocks
+
+
+def fetch_kobo_fundamentals() -> dict[str, dict]:
+    """One authenticated bulk request. Do not put the API key in a URL or sync log."""
+    try:
+        response = _get_session().get(
+            "https://koboterminal.com/api/ngxdata/fundamentals",
+            headers=_ngxpulse_headers(), timeout=20, allow_redirects=False,
+        )
+    except requests.RequestException:
+        raise NgxFetchError("Kobo fundamentals request could not reach the provider.") from None
+    if response.status_code != 200:
+        raise NgxFetchError(f"Kobo fundamentals returned HTTP {response.status_code}.")
+    try:
+        payload = response.json()
+    except ValueError:
+        raise NgxFetchError("Kobo fundamentals did not return JSON.") from None
+    if not isinstance(payload, dict) or payload.get("success") is not True or not isinstance(payload.get("fundamentals"), list):
+        raise NgxFetchError("Kobo fundamentals response did not contain a successful fundamentals list.")
+
+    by_symbol = {}
+    for row in payload["fundamentals"]:
+        if not isinstance(row, dict) or not isinstance(row.get("symbol"), str):
+            continue
+        symbol = row["symbol"].strip().upper()
+        if not symbol:
+            continue
+        metrics = {}
+        for field in ("pe_ratio", "forward_pe", "eps", "dividend_per_share", "dividend_yield",
+                      "beta", "52w_change", "roa", "roe", "pb_ratio", "debt_equity",
+                      "profit_margin", "gross_margin"):
+            raw = row.get(field)
+            value = _number(raw) if isinstance(raw, (str, int, float)) and not isinstance(raw, bool) else None
+            metrics[field] = value if value is not None and math.isfinite(value) else None
+        metrics["updated_at"] = row.get("updated_at") if isinstance(row.get("updated_at"), str) else None
+        if isinstance(row.get("extra"), dict):
+            metrics["extra"] = {
+                k: v for k, v in row["extra"].items()
+                if v is None or isinstance(v, (int, str)) or (isinstance(v, float) and math.isfinite(v))
+            }
+        by_symbol[symbol] = metrics
+    return by_symbol
 
 
 def _fetch_all_stocks_from_doclib() -> list[dict[str, Any]]:
@@ -843,48 +889,108 @@ def fetch_dividend_history_from_ngxpulse(symbol: str, limit: int = 8) -> list[di
     return items
 
 
-def fetch_disclosures_from_ngxpulse(symbol: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
-    params: dict[str, Any] = {"limit": limit}
-    if symbol:
-        params["symbol"] = symbol.strip().upper()
+def _kobo_feed(path: str, *, authenticated: bool) -> dict:
     try:
         response = _get_session().get(
-            f"{_ngxpulse_base_url()}/api/ngxdata/disclosures",
-            params=_ngxpulse_query_params(params),
-            headers=_ngxpulse_headers(),
-            timeout=15,
+            f"https://koboterminal.com/api/{path}",
+            headers=_ngxpulse_headers() if authenticated else {"Accept": "application/json"},
+            timeout=10, allow_redirects=False,
         )
-        response.raise_for_status()
+        if response.status_code != 200:
+            raise NgxFetchError(f"Kobo {path} returned HTTP {response.status_code}.")
         payload = response.json()
-    except requests.RequestException as exc:
-        raise NgxFetchError(f"NGX Pulse disclosures request failed: {exc}") from exc
-    except ValueError as exc:
-        raise NgxFetchError(f"NGX Pulse disclosures response was not valid JSON: {exc}") from exc
+    except (requests.RequestException, ValueError):
+        raise NgxFetchError(f"Kobo {path} unavailable.") from None
+    if not isinstance(payload, dict) or payload.get("success") is not True or not isinstance(payload.get("data"), list):
+        raise NgxFetchError(f"Invalid Kobo {path} response.")
+    return payload
 
-    disclosures = _list_payload(payload, ["disclosures", "results", "items", "data"])
-    symbol_filter = symbol.strip().upper() if symbol else None
-    items: list[dict[str, Any]] = []
-    for item in disclosures:
-        if not isinstance(item, dict):
+
+def _ngx_link(value: Any) -> str | None:
+    url = str(value or "").strip()
+    try:
+        parts = urlparse(url)
+        if parts.scheme == "https" and (parts.hostname or "").endswith(".ngxgroup.com"):
+            return parts._replace(fragment="").geturl()
+    except ValueError:
+        pass
+    return None
+
+
+@_ttl_cache(ttl_seconds=300)
+def fetch_disclosure_feed() -> list[dict]:
+    documents = {}
+    for row in _kobo_feed("ngxdata/disclosures", authenticated=True)["data"]:
+        if not isinstance(row, dict):
             continue
-        item_symbol = _first(item, ["symbol", "ticker", "stock_symbol"])
-        if symbol_filter and item_symbol and str(item_symbol).strip().upper() != symbol_filter:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        symbol = {"NB PLC": "NB", "UPDC REIT": "UPDCREIT", "INTENEGINS[MRS]": "INTENEGINS"}.get(symbol, symbol)
+        url = _ngx_link(row.get("url"))
+        if not symbol or not url:
             continue
-        items.append(
-            {
-                "title": _first(item, ["title", "headline", "subject", "name"]),
-                "url": _first(item, ["url", "link", "document_url"]),
-                "published_at": _parse_datetime(
-                    _first(item, ["published_at", "publishedAt", "date", "created_at", "timestamp"])
-                ),
-                "symbol": str(item_symbol).strip().upper() if item_symbol else symbol_filter,
-                "company_name": _first(item, ["company_name", "company", "issuer", "name"]),
-                "category": _first(item, ["category", "type", "submission_type"]),
-                "summary": _first(item, ["summary", "description", "excerpt"]),
-                "source": "ngxpulse_disclosures",
-            }
-        )
-    return items[:limit]
+        category = row.get("type")
+        category = {"DirectorsDealings": "Directors' dealings", "EarningForcast": "Earnings forecast"}.get(category, category)
+        company = str(row.get("company") or "").strip()
+        filename = unquote(urlparse(url).path.rsplit("/", 1)[-1])
+        fallback = re.sub(r"^\d+[_ -]*|\.pdf$", "", filename, flags=re.I).replace("_", " ")
+        title = str(row.get("title") or "").strip() or fallback
+        if company and title.upper().startswith(company.upper()):
+            title = title[len(company):].lstrip(" .:-_")
+        if title.strip().upper() == "DIRECTORSDEALINGS":
+            title = fallback
+        title = " ".join(title.split()) or category or "Company filing"
+        if re.search(r"\brights (?:issue|offering)\b", title, re.I):
+            category = "Rights issue"
+        elif re.search(r"\b(?:IPO|initial public offering)\b", title, re.I):
+            category = "IPO"
+        elif re.search(r"\bdividends?\b", title, re.I):
+            category = "Dividend"
+        key = (symbol, url)
+        modified = str(row.get("modified") or row.get("created") or "")
+        published = _parse_datetime(row.get("created"))
+        if key not in documents or modified > documents[key][0]:
+            documents[key] = (modified, dict(symbol=symbol, company_name=company, category=category,
+                title=title, published_at=published.isoformat() if published else None, url=url, source="kobo_disclosures"))
+    return sorted((item for _, item in documents.values()), key=lambda item: item["published_at"] or "", reverse=True)
+
+
+@_ttl_cache(ttl_seconds=300)
+def _offer_snapshot() -> dict:
+    return _kobo_feed("site/offers", authenticated=False)
+
+
+def active_offers(now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(timezone.utc)
+    wat = timezone(timedelta(hours=1))
+    today = now.astimezone(wat).date()
+    snapshot = _offer_snapshot()
+    updated = _parse_datetime(snapshot.get("updated_at"))
+    if not updated or not updated.tzinfo or now - updated > timedelta(hours=48):
+        return []
+    offers = {}
+    for row in snapshot["data"]:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        label = str(row.get("type_label") or "").strip().lower()
+        kind = {"rights issue": "Rights issue", "rights issuance": "Rights issue", "ipo": "IPO",
+                "initial public offering": "IPO", "public offer": "Public offer",
+                "public offering": "Public offer"}.get(label)
+        status = str(row.get("status") or "").strip().lower()
+        if not name or not kind:
+            continue
+        key = row.get("id") or (name.casefold(), kind)
+        offers.pop(key, None)
+        if status not in {"active", "open", "ongoing", "upcoming"}:
+            continue
+        start, end = (_parse_date(row.get(field)) for field in ("start_date", "end_date"))
+        if end and (end < today or (start and start > end)):
+            continue
+        upcoming = (start and start > today) or status == "upcoming"
+        symbol = str(row.get("symbol") or "").strip().upper() or None
+        offers[key] = dict(name=name, symbol=symbol, kind=kind, status="Upcoming" if upcoming else "Open",
+            next_date=start if upcoming else end, url=_ngx_link(row.get("source_url")) or "https://www.invest.ngxgroup.com/")
+    return sorted(offers.values(), key=lambda item: item["next_date"] or date.max)
 
 
 def fetch_market_news_from_ngxpulse(limit: int = 8) -> list[dict[str, Any]]:
@@ -953,11 +1059,6 @@ def fetch_historical_prices_cached(
 @_ttl_cache(ttl_seconds=900)
 def fetch_dividend_history_cached(symbol: str, limit: int = 8) -> list[dict[str, Any]]:
     return fetch_dividend_history_from_ngxpulse(symbol, limit)
-
-
-@_ttl_cache(ttl_seconds=300)
-def fetch_disclosures_cached(symbol: str | None = None, limit: int = 8) -> list[dict[str, Any]]:
-    return fetch_disclosures_from_ngxpulse(symbol, limit)
 
 
 @_ttl_cache(ttl_seconds=300)

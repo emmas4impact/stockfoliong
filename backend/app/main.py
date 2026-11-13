@@ -16,11 +16,15 @@ from sqlalchemy.orm import Session, selectinload
 
 from .auth import create_access_token, get_current_superuser, get_current_user, hash_password, verify_password
 from .database import Base, SessionLocal, engine, get_db
+from .analysis import latest_observations, score_observation
+from .models import FinancialStatement, StockAnalysis
+from .financials import FinancialsOut, StatementInput, get_financials
 from .legal import render_account_deletion_html, render_privacy_policy_html
 from .models import AccountDeletionRequest, PortfolioHolding, PushDeviceToken, Stock, StockPrice, User
 from .notifications import portfolio_report_pdf, send_email
 from .ngx_client import (
     NgxFetchError,
+    active_offers,
     discover_stock_ngx_id,
     fetch_all_stocks_from_ngx_cached,
     fetch_stock_logo,
@@ -40,6 +44,7 @@ from .schemas import (
     MarketIdeaOut,
     MarketLeadersOut,
     MarketNewsOut,
+    MarketOfferOut,
     MarketSnapshotOut,
     MarketStatusOut,
     MessageResponse,
@@ -69,7 +74,7 @@ from .services import (
     get_cached_market_news,
     get_cached_market_snapshot,
     get_cached_market_status,
-    holding_to_dict,
+    price_holdings,
     record_sync_log,
     reference_cache_refresh_due,
     refresh_reference_caches,
@@ -643,6 +648,7 @@ def ensure_runtime_schema() -> None:
             text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS shares_outstanding NUMERIC(24, 2)")
         )
         conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS pe_ratio NUMERIC(14, 4)"))
+        conn.execute(text("ALTER TABLE stocks ADD COLUMN IF NOT EXISTS unit_price_field VARCHAR(32)"))
 
 
 @app.on_event("startup")
@@ -1022,7 +1028,7 @@ def email_portfolio_report(
         .where(PortfolioHolding.user_id == user.id)
         .order_by(PortfolioHolding.stock_symbol)
     ).all()
-    holding_rows = [holding_to_dict(holding) for holding in holdings]
+    holding_rows = price_holdings(holdings)
     pdf = portfolio_report_pdf(user, holding_rows)
 
     if not settings.email_enabled:
@@ -1117,6 +1123,37 @@ def get_market_ideas(
     return market_ideas_payload(db, limit)
 
 
+@app.get("/stocks/{symbol}/analysis")
+def get_stock_analysis(
+    symbol: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict:
+    symbol = symbol.strip().upper()
+    if db.get(Stock, symbol) is None:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    universe = latest_observations(db)
+    target = next((row for row in universe if row.stock_symbol == symbol), None)
+    if target is None:
+        raise HTTPException(status_code=503, detail="Analysis awaits a successful market data sync")
+    return {**score_observation(target, universe), "generated_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/stocks/{symbol}/analysis/history")
+def get_stock_analysis_history(
+    symbol: str,
+    limit: int = Query(default=30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> list[dict]:
+    symbol = symbol.strip().upper()
+    if db.get(Stock, symbol) is None:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    return [row.result for row in db.scalars(select(StockAnalysis).where(
+        StockAnalysis.stock_symbol == symbol,
+    ).order_by(StockAnalysis.generated_at.desc(), StockAnalysis.id.desc()).limit(limit))]
+
+
 @app.get("/stocks", response_model=list[StockOut])
 def list_stocks(
     search: str | None = None,
@@ -1167,6 +1204,14 @@ def get_stock_dividends(
     if not settings.ngxpulse_enabled:
         return []
     return get_cached_dividend_history(db, stock.symbol, limit)
+
+
+@app.get("/public/market/offers", response_model=list[MarketOfferOut])
+def get_market_offers() -> list[dict]:
+    try:
+        return active_offers()
+    except NgxFetchError as exc:
+        raise HTTPException(status_code=503, detail="Offer information unavailable.") from exc
 
 
 @app.get("/stocks/{symbol}/disclosures", response_model=list[DisclosureOut])
@@ -1260,17 +1305,46 @@ def build_stock_detail(
     disclosures: list[dict] = []
     if settings.ngxpulse_enabled:
         dividends = get_cached_dividend_history(db, stock.symbol, 10)
-        disclosures = get_cached_disclosures(db, stock.symbol, news_limit)
+        disclosures = get_cached_disclosures(db, stock.symbol, 1000)
+
+    try:
+        offers = [row for row in active_offers() if row["symbol"] == stock.symbol or (
+            not row["symbol"] and row["name"].casefold() == (stock.name or "").strip().casefold()
+        )]
+    except NgxFetchError:
+        offers = []
 
     return {
         "stock": stock,
         "history": rows,
         "market_snapshot": market_snapshot,
         "history_source": stock_history_source(stock),
+        "financials": get_financials(db, stock.symbol),
         "news": news,
         "dividends": dividends,
         "disclosures": disclosures,
+        "offers": offers,
     }
+
+
+@app.put("/admin/stocks/{symbol}/financial-statements", response_model=FinancialsOut)
+def put_financial_statement(
+    symbol: str,
+    statement: StatementInput,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_superuser),
+):
+    symbol = symbol.strip().upper()
+    if db.get(Stock, symbol) is None:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    row = db.get(FinancialStatement, (symbol, statement.storage_key))
+    if row is None:
+        row = FinancialStatement(stock_symbol=symbol, period_key=statement.storage_key)
+        db.add(row)
+    row.payload = statement.model_dump(mode="json")
+    row.reviewed_by = admin.id
+    db.commit()
+    return get_financials(db, symbol)
 
 
 @app.get("/public/stocks/{symbol}/detail", response_model=StockDetailOut, include_in_schema=False)
@@ -1419,7 +1493,7 @@ def list_holdings(db: Session = Depends(get_db), user: User = Depends(get_curren
         .where(PortfolioHolding.user_id == user.id)
         .order_by(PortfolioHolding.stock_symbol)
     ).all()
-    return [holding_to_dict(holding) for holding in holdings]
+    return price_holdings(holdings)
 
 
 @app.post("/portfolio/holdings", response_model=HoldingOut)
@@ -1429,7 +1503,7 @@ def save_holding(
     user: User = Depends(get_current_user),
 ) -> dict:
     holding = upsert_holding(db, user, payload)
-    return holding_to_dict(holding)
+    return price_holdings([holding])[0]
 
 
 @app.delete("/portfolio/holdings/{symbol}", status_code=status.HTTP_204_NO_CONTENT)
