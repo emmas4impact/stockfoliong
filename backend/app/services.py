@@ -65,6 +65,34 @@ def dividend_cache_key(symbol: str, limit: int = 10) -> str:
 
 
 DISCLOSURE_FEED_KEY = "kobo_disclosures"
+FUNDAMENTALS_CACHE_KEY = "kobo_fundamentals:bulk"
+FUNDAMENTALS_RETRY_KEY = "kobo_fundamentals:retry_after"
+FUNDAMENTALS_REFRESH_INTERVAL = timedelta(hours=24)
+FUNDAMENTALS_FAILURE_BACKOFF = timedelta(hours=1)
+
+
+def _fundamentals_for_sync(db):
+    now = datetime.now(timezone.utc)
+    batch = get_cached_dict_payload(db, FUNDAMENTALS_CACHE_KEY)
+    if batch and datetime.fromisoformat(batch["received_at"]) + FUNDAMENTALS_REFRESH_INTERVAL > now:
+        return batch["symbols"], batch["received_at"]
+
+    retry = get_cached_dict_payload(db, FUNDAMENTALS_RETRY_KEY)
+    if retry and datetime.fromisoformat(retry["retry_after"]) > now:
+        raise NgxFetchError("Fundamentals refresh is in backoff; last saved valuations remain available.")
+    try:
+        symbols = fetch_kobo_fundamentals()
+        if not symbols:
+            raise NgxFetchError("Empty fundamentals feed; last saved valuations remain available.")
+    except NgxFetchError:
+        cache_api_payload(db, cache_key=FUNDAMENTALS_RETRY_KEY,
+                          payload={"retry_after": (now + FUNDAMENTALS_FAILURE_BACKOFF).isoformat()},
+                          source="kobo_fundamentals")
+        raise
+    received = now.isoformat()
+    cache_api_payload(db, cache_key=FUNDAMENTALS_CACHE_KEY,
+                      payload={"received_at": received, "symbols": symbols}, source="kobo_fundamentals")
+    return symbols, received
 
 
 def record_sync_log(
@@ -125,19 +153,22 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
     enrichment_message = None
     if source == "ngxpulse":
         try:
-            fundamentals = fetch_kobo_fundamentals()
+            fundamentals, received = _fundamentals_for_sync(db)
         except NgxFetchError as exc:
             enrichment_message = f"{exc} Continuing with stock-list data."
             record_sync_log(db, status="warning", source="kobo_fundamentals", message=enrichment_message)
         else:
             matches = 0
             trailing_pe_count = 0
+            # Never attach enrichment to the provider's potentially cached quote objects.
+            stocks = [dict(quote) for quote in stocks]
             for quote in stocks:
                 metrics = fundamentals.get(quote["symbol"])
                 if metrics is None:
                     continue
                 matches += 1
                 quote["fundamentals"] = metrics
+                quote["fundamentals_received_at"] = received
                 if metrics["pe_ratio"] is not None:
                     quote["pe_ratio"] = metrics["pe_ratio"]
                     trailing_pe_count += 1
@@ -373,10 +404,7 @@ def get_cached_disclosures(
     symbol: str,
     limit: int = 8,
 ) -> list[dict]:
-    try:
-        feed = fetch_disclosure_feed()
-    except NgxFetchError:
-        feed = get_cached_list_payload(db, DISCLOSURE_FEED_KEY)
+    feed = get_cached_list_payload(db, DISCLOSURE_FEED_KEY)
     symbol = symbol.strip().upper()
     return [row for row in feed if row["symbol"] == symbol][:limit]
 
@@ -654,7 +682,10 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
 
     if get_settings().ngxpulse_enabled:
         try:
-            cache_api_payload(db, cache_key=DISCLOSURE_FEED_KEY, payload=fetch_disclosure_feed(),
+            feed = fetch_disclosure_feed()
+            if not feed:
+                raise NgxFetchError("Empty disclosure feed; keeping previously saved filings.")
+            cache_api_payload(db, cache_key=DISCLOSURE_FEED_KEY, payload=feed,
                               source="kobo_disclosures")
             cache_entries += 1
         except NgxFetchError as exc:

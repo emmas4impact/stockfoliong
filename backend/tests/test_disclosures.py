@@ -2,12 +2,15 @@ import os
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
 os.environ.setdefault("JWT_SECRET_KEY", "test-only-not-a-deployment-secret")
 
 from backend.app import ngx_client as client
 from backend.app import services
+from backend.app.database import Base
 
 
 class DisclosureTests(unittest.TestCase):
@@ -23,11 +26,21 @@ class DisclosureTests(unittest.TestCase):
         client.clear_runtime_caches()
         self.addCleanup(client.clear_runtime_caches)
         with patch.object(client, "_kobo_feed", return_value={"data": rows}) as fetch:
-            filings = services.get_cached_disclosures(None, "CHAMS")
+            engine = create_engine("sqlite://")
+            self.addCleanup(engine.dispose)
+            Base.metadata.create_all(engine)
+            db = Session(engine)
+            self.addCleanup(db.close)
+            self.assertEqual(services.get_cached_disclosures(db, "CHAMS"), [])
+            fetch.assert_not_called()
+            services.cache_api_payload(db, cache_key=services.DISCLOSURE_FEED_KEY, payload=client.fetch_disclosure_feed())
+            db.commit()
+            client.clear_runtime_caches()
+            filings = services.get_cached_disclosures(db, "CHAMS")
             self.assertEqual([f["title"] for f in filings], ["Amended notice", "Dealing B"])
             self.assertEqual(filings[0]["published_at"], base["created"])
-            self.assertEqual(services.get_cached_disclosures(None, "gtco")[0]["title"], "Total voting rights")
-            self.assertEqual(services.get_cached_disclosures(None, "gtco")[0]["category"], "Corporate Actions")
+            self.assertEqual(services.get_cached_disclosures(db, "gtco")[0]["title"], "Total voting rights")
+            self.assertEqual(services.get_cached_disclosures(db, "gtco")[0]["category"], "Corporate Actions")
             fetch.assert_called_once_with("ngxdata/disclosures", authenticated=True)
 
     def test_curated_offers_only_and_extension_replaces_original(self):

@@ -97,10 +97,13 @@ def valuation_snapshot(observation, now=None):
     freshness = "unknown"
     if updated is not None:
         freshness = "current" if now - timedelta(days=7) <= updated <= now else "stale"
-    if not now - timedelta(days=7) <= utc(observation.observed_at) <= now:
+    observed = utc(datetime.fromisoformat(observation.inputs["fundamentals_received_at"])) if (
+        observation.inputs.get("fundamentals_received_at")
+    ) else utc(observation.observed_at)
+    if not now - timedelta(days=7) <= observed <= now:
         freshness = "stale"
     return ValuationOut(
-        observed_at=utc(observation.observed_at), provider_updated_at=updated,
+        observed_at=observed, provider_updated_at=updated,
         freshness=freshness,
         **{key: finite_number(metrics.get(key)) for key in ("pb_ratio", "pe_ratio", "eps")},
     )
@@ -131,8 +134,13 @@ def statement_history(statements):
 
 
 def get_financials(db, symbol):
+    # A newer quote-only observation must not hide a previous successful valuation.
+    metrics = FundamentalObservation.inputs["fundamentals"]
     observation = db.scalar(select(FundamentalObservation).where(
         FundamentalObservation.stock_symbol == symbol,
+        (metrics["pb_ratio"].as_string().is_not(None)
+         | metrics["pe_ratio"].as_string().is_not(None)
+         | metrics["eps"].as_string().is_not(None)),
     ).order_by(FundamentalObservation.observed_at.desc(), FundamentalObservation.id.desc()).limit(1))
     rows = db.scalars(select(FinancialStatement).where(FinancialStatement.stock_symbol == symbol))
     statements = [StatementInput.model_validate(row.payload) for row in rows]

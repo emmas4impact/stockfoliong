@@ -2,8 +2,12 @@
 
 Portfolio and stock details expose `financials` on the existing detail response.
 The Flutter view is shared by web, Android and iOS. Valuations come from the latest
-saved Kobo fundamentals observation; no provider request or PDF extraction runs
-when opening the view. P/B and P/E are multiples, not currency amounts. Provider
+saved Kobo observation containing P/B, P/E or EPS. A newer price-only sync does
+not replace that valuation. Stock sync caches the bulk response in the database
+for 24 hours and retains its original receipt time when reusing it. A failed
+refresh does not erase prior valuations, and reading financials or filing links
+does not fetch from Kobo. Filing links come from the reference-cache sync.
+P/B and P/E are multiples, not currency amounts. Provider
 EPS has no currency/period metadata and is displayed as provider units only.
 
 Annual/interim figures require reviewed structured data. Disclosure metadata is

@@ -50,6 +50,8 @@ def record_observation(db, stock_data, observed_at=None):
     if "fundamentals" in stock_data:
         inputs["fundamentals"] = stock_data["fundamentals"]
         inputs["fundamentals_source"] = "kobo_fundamentals"
+        if stock_data.get("fundamentals_received_at"):
+            inputs["fundamentals_received_at"] = stock_data["fundamentals_received_at"]
         if stock_data["fundamentals"]["pe_ratio"] is not None:
             inputs["pe_basis"] = "trailing"
     previous = db.scalar(select(FundamentalObservation).where(

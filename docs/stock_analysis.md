@@ -19,13 +19,16 @@ carried-forward Stock fields can contaminate it. Identical observations on the
 same UTC day are skipped; changes and subsequent days are retained. No retention
 deletion is configured for either table.
 
-When the live stock list comes from NGXPulse, each sync also makes one bulk GET to
+When the live stock list comes from NGXPulse, the sync reuses a bulk fundamentals
+batch saved in the database for 24 hours. On a cold or expired cache it requests
 `https://koboterminal.com/api/ngxdata/fundamentals`, using the existing
 `NGXPULSE_API_KEY` in the request header. It joins by symbol, not list position.
 A match stores metrics, provider `updated_at` and scalar `extra` fields in
 `inputs.fundamentals`. A numeric trailing P/E from that endpoint takes precedence
 over stock-list P/E. Forward P/E is never substituted. Unmatched quotes still sync;
 a failed fundamentals request is logged and does not stop price ingestion.
+After a failure, the sync waits at least one hour before retrying. Financial
+detail reads continue serving the last usable valuation for each symbol.
 The sync result message reports matches or the provider error. No database migration
 or Flutter rebuild is required for this enrichment.
 

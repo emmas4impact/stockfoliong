@@ -106,7 +106,7 @@ class FinancialsTests(unittest.TestCase):
             main.app.dependency_overrides.pop(get_current_user)
             self.assertEqual(put(url, json=payload).status_code, 401)
 
-    def test_no_carry_forward_after_failed_fundamentals_sync(self):
+    def test_return_last_usable_snapshot_even_after_empty_and_price_only_updates(self):
         engine = create_engine("sqlite://")
         self.addCleanup(engine.dispose)
         Base.metadata.create_all(engine)
@@ -115,7 +115,11 @@ class FinancialsTests(unittest.TestCase):
             db.add(Stock(symbol="BANK"))
             db.add_all([FundamentalObservation(observation_key="old", stock_symbol="BANK", source="ngxpulse",
                 observed_at=now - timedelta(days=1), inputs={"fundamentals": {"pb_ratio": .41}}),
+                FundamentalObservation(observation_key="empty", stock_symbol="BANK", source="ngxpulse",
+                observed_at=now, inputs={"fundamentals": {"pb_ratio": None, "eps": None}}),
                 FundamentalObservation(observation_key="new", stock_symbol="BANK", source="ngxpulse",
                 observed_at=now, inputs={})])
             db.commit()
-            self.assertIsNone(get_financials(db, "BANK").valuation)
+            result = get_financials(db, "BANK").valuation
+            self.assertEqual(result.pb_ratio, .41)
+            self.assertEqual(result.observed_at, now - timedelta(days=1))
