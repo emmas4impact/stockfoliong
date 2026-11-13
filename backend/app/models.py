@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, LargeBinary, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -68,6 +68,14 @@ class Stock(TimestampMixin, Base):
     @property
     def supports_history(self) -> bool:
         return bool(self.ngx_id) or get_settings().ngxpulse_enabled
+
+
+class StockLogo(TimestampMixin, Base):
+    __tablename__ = "stock_logos"
+
+    symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol", ondelete="CASCADE"), primary_key=True)
+    png: Mapped[bytes] = mapped_column(LargeBinary)
+    source: Mapped[str] = mapped_column(Text)
 
 
 class StockPrice(TimestampMixin, Base):

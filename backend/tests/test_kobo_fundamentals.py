@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 os.environ["DATABASE_URL"] = "sqlite://"
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from backend.app import ngx_client, services
 from backend.app.database import Base
+from backend.app.financials import get_financials
 from backend.app.models import Stock, StockAnalysis, SyncLog
 
 
@@ -72,3 +74,37 @@ class KoboSyncTests(unittest.TestCase):
         self.get.return_value.json.return_value = {"success": False, "fundamentals": []}
         with self.assertRaises(ngx_client.NgxFetchError):
             ngx_client.fetch_kobo_fundamentals()
+
+    def test_quota_failure_keeps_committed_snapshot_and_receipt_time(self):
+        self.get.return_value.json.return_value = {"success": True, "fundamentals": [
+            {"symbol": "GTCO", "pb_ratio": 1.26, "eps": 21.39}
+        ]}
+        services.sync_stocks(self.db)
+        original = get_financials(self.db, "GTCO").valuation
+        services.sync_stocks(self.db)
+        self.assertEqual(self.get.call_count, 1)
+        self.assertEqual(get_financials(self.db, "GTCO").valuation, original)
+
+        batch = services.get_cached_dict_payload(self.db, services.FUNDAMENTALS_CACHE_KEY)
+        batch["received_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        services.cache_api_payload(self.db, cache_key=services.FUNDAMENTALS_CACHE_KEY, payload=batch)
+        self.db.commit()
+        self.get.return_value.status_code = 429
+        self.assertIn("429", services.sync_stocks(self.db)[-1])
+        self.assertIn("backoff", services.sync_stocks(self.db)[-1])
+        with Session(self.db.get_bind()) as reader:
+            self.assertEqual(get_financials(reader, "GTCO").valuation, original)
+            self.assertIsNone(get_financials(reader, "UNMATCHED").valuation)
+        self.assertEqual(self.get.call_count, 2)
+        services.cache_api_payload(self.db, cache_key=services.FUNDAMENTALS_RETRY_KEY,
+                                   payload={"retry_after": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()})
+        self.db.commit()
+        self.get.return_value.status_code = 200
+        self.get.return_value.json.return_value = {"success": True, "fundamentals": [
+            {"symbol": "GTCO", "pb_ratio": 1.35, "eps": 22.01}
+        ]}
+        services.sync_stocks(self.db)
+        refreshed = get_financials(self.db, "GTCO").valuation
+        self.assertEqual(self.get.call_count, 3)
+        self.assertEqual(refreshed.pb_ratio, 1.35)
+        self.assertGreater(refreshed.observed_at, original.observed_at)
