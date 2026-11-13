@@ -11,6 +11,92 @@ String _amount(double? value) =>
 String _signedPercent(double percent) =>
     '${percent > 0 ? '+' : ''}${percent.toStringAsFixed(2)}%';
 
+class HoldingReturnHighlights extends StatelessWidget {
+  const HoldingReturnHighlights({
+    super.key,
+    required this.highest,
+    this.lowest,
+    required this.onSelect,
+  });
+
+  final Holding highest;
+  final Holding? lowest;
+  final ValueChanged<Holding> onSelect;
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = [
+      if (highest.profitLossPercent != null) ('Highest return', highest),
+      if (lowest != null && lowest!.symbol != highest.symbol && lowest!.profitLossPercent != null)
+        ('Lowest return', lowest!),
+    ];
+    return LayoutBuilder(builder: (context, constraints) {
+      final columns = constraints.maxWidth >= 620 && entries.length > 1 ? 2 : 1;
+      final width = (constraints.maxWidth - (columns - 1) * 12) / columns;
+      return Wrap(spacing: 12, runSpacing: 12, children: [
+        for (final (label, holding) in entries)
+          SizedBox(width: width, child: _ReturnHighlight(
+            label: label, holding: holding, onTap: () => onSelect(holding),
+          )),
+      ]);
+    });
+  }
+}
+
+class _ReturnHighlight extends StatelessWidget {
+  const _ReturnHighlight({required this.label, required this.holding, required this.onTap});
+  final String label;
+  final Holding holding;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final value = holding.profitLossPercent!;
+    final negative = value < 0;
+    final accent = negative ? scheme.error : value > 0
+        ? (theme.brightness == Brightness.dark ? const Color(0xff7cddb2) : const Color(0xff087448))
+        : scheme.onSurfaceVariant;
+    final trend = negative ? Icons.trending_down : value > 0 ? Icons.trending_up : Icons.trending_flat;
+    return Semantics(button: true, child: Material(
+      color: Color.alphaBlend(accent.withValues(alpha: .035), scheme.surface),
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8),
+        side: BorderSide(color: accent.withValues(alpha: .22))),
+      child: InkWell(onTap: onTap, child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Expanded(child: Text(label, style: theme.textTheme.labelMedium?.copyWith(
+              color: scheme.onSurfaceVariant, fontWeight: FontWeight.w500))),
+            Icon(Icons.arrow_outward, size: 16, color: scheme.onSurfaceVariant),
+          ]),
+          const SizedBox(height: 14),
+          Row(children: [
+            CompanyLogo(symbol: holding.symbol, size: 34, useInitials: true),
+            const SizedBox(width: 10),
+            Expanded(flex: 5, child: Text(holding.symbol, style: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w700))),
+            const SizedBox(width: 12),
+            Expanded(flex: 4, child: FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerRight,
+              child: Text(_signedPercent(value), style: TextStyle(
+                fontSize: 26, fontWeight: FontWeight.w700, color: accent,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              )))),
+          ]),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(child: Text('Since purchase', style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant))),
+            Icon(trend, size: 18, color: accent),
+          ]),
+        ]),
+      )),
+    ));
+  }
+}
+
 class PortfolioSummaryStrip extends StatelessWidget {
   const PortfolioSummaryStrip({
     super.key,

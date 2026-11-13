@@ -4187,11 +4187,15 @@ class _HomeScreenState extends State<HomeScreen> {
                     togglePrivacy: widget.onToggleFinancialPrivacy),
                 if (!widget.hideFinancialValues && bestHolding != null) Padding(
                   padding: const EdgeInsets.only(top: 12),
-                  child: Wrap(spacing: 22, runSpacing: 6, children: [
-                    Text('Highest return   ${bestHolding.symbol}  ${_signedPercent(bestHolding.profitLossPercent!)}'),
-                    if (weakestHolding != null && weakestHolding != bestHolding)
-                      Text('Lowest return   ${weakestHolding.symbol}  ${_signedPercent(weakestHolding.profitLossPercent!)}'),
-                  ]),
+                  child: HoldingReturnHighlights(
+                    highest: bestHolding,
+                    lowest: weakestHolding,
+                    onSelect: (holding) => _openStockDetail(Stock.fromJson({
+                      'symbol': holding.symbol,
+                      'name': holding.name,
+                      'last_price': holding.currentPrice,
+                    })),
+                  ),
                 ),
               ] else if (snapshot.hasError)
                 TextButton.icon(onPressed: refresh, icon: const Icon(Icons.refresh), label: const Text('Reload portfolio'))

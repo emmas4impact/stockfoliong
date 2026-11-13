@@ -17,7 +17,7 @@ from backend.app import main
 from backend.app.auth import get_current_user
 from backend.app.database import Base, get_db
 from backend.app.financials import StatementInput, get_financials, statement_history, valuation_snapshot
-from backend.app.models import FinancialStatement, FundamentalObservation, Stock, User
+from backend.app.models import FinancialStatement, FundamentalObservation, PortfolioHolding, Stock, User
 
 
 def statement(year=2025, **changes):
@@ -76,6 +76,9 @@ class FinancialsTests(unittest.TestCase):
             user = User(email="reviewer@example.com", password_hash="unused", is_superuser=False)
             db.add_all([user, Stock(symbol="BANK")])
             db.commit()
+            holding = PortfolioHolding(user_id=user.id, stock_symbol="BANK", quantity=125, avg_purchase_price=12)
+            db.add(holding)
+            db.commit()
             main.app.dependency_overrides[get_db] = lambda: db
             main.app.dependency_overrides[get_current_user] = lambda: user
             self.addCleanup(main.app.dependency_overrides.clear)
@@ -96,7 +99,12 @@ class FinancialsTests(unittest.TestCase):
             self.assertEqual(put(url, json=payload).status_code, 200)
             self.assertEqual(len(list(db.scalars(select(FinancialStatement)))), 1)
             self.assertEqual(get_financials(db, "BANK").statements[0].metrics.revenue, 1300)
+            db.refresh(holding)
+            self.assertEqual(float(holding.quantity), 125)
+            self.assertEqual(float(holding.avg_purchase_price), 12)
             self.assertEqual(put("/admin/stocks/UNKNOWN/financial-statements", json=payload).status_code, 404)
+            main.app.dependency_overrides.pop(get_current_user)
+            self.assertEqual(put(url, json=payload).status_code, 401)
 
     def test_no_carry_forward_after_failed_fundamentals_sync(self):
         engine = create_engine("sqlite://")
