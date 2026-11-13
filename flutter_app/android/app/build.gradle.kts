@@ -82,3 +82,6 @@ android {
 flutter {
     source = "../.."
 }
+dependencies {
+    implementation("androidx.biometric:biometric:1.1.0")
+}

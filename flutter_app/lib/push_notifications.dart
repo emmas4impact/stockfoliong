@@ -25,10 +25,13 @@ const _firebaseIosBundleId = String.fromEnvironment(
 
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  final options = _firebaseOptionsForCurrentPlatform();
-  if (options == null) return;
+  await _initializeFirebase();
+}
+
+Future<void> _initializeFirebase() async {
   if (Firebase.apps.isEmpty) {
-    await Firebase.initializeApp(options: options);
+    // Null options use the google-services resources / bundled Apple plist.
+    await Firebase.initializeApp(options: _firebaseOptionsForCurrentPlatform());
   }
 }
 
@@ -74,7 +77,6 @@ class PushNotifications {
     message: 'Push alerts have not been checked yet.',
   );
   String? _currentToken;
-  bool _initialized = false;
   PushAlertMessage? _pendingOpenedMessage;
 
   Stream<PushAlertMessage> get messages => _messages.stream;
@@ -90,10 +92,6 @@ class PushNotifications {
   Future<PushRegistrationResult> ensureRegistered({
     required PushTokenRegistrar registerToken,
   }) async {
-    if (_initialized) {
-      return _lastResult;
-    }
-
     if (kIsWeb) {
       _lastResult = const PushRegistrationResult(
         enabled: false,
@@ -114,21 +112,8 @@ class PushNotifications {
       return _lastResult;
     }
 
-    final options = _firebaseOptionsForCurrentPlatform();
-    if (options == null) {
-      _lastResult = const PushRegistrationResult(
-        enabled: false,
-        available: false,
-        message:
-            'Firebase config is missing. Add the Firebase dart-defines before testing device push.',
-      );
-      return _lastResult;
-    }
-
     try {
-      if (Firebase.apps.isEmpty) {
-        await Firebase.initializeApp(options: options);
-      }
+      await _initializeFirebase();
       FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
 
       final messaging = FirebaseMessaging.instance;
@@ -163,6 +148,20 @@ class PushNotifications {
           badge: true,
           sound: true,
         );
+        for (
+          var attempt = 0;
+          await messaging.getAPNSToken() == null;
+          attempt++
+        ) {
+          if (attempt == 5) {
+            return _lastResult = const PushRegistrationResult(
+              enabled: false,
+              message:
+                  'Apple push registration is pending. Refresh push setup in a moment.',
+            );
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+        }
       }
 
       final token = await messaging.getToken();
@@ -178,11 +177,9 @@ class PushNotifications {
 
       await registerToken(token, platform: _platformName(platform));
       _currentToken = token;
-      _initialized = true;
 
-      _refreshSubscription ??= messaging.onTokenRefresh.listen((
-        newToken,
-      ) async {
+      await _refreshSubscription?.cancel();
+      _refreshSubscription = messaging.onTokenRefresh.listen((newToken) async {
         _currentToken = newToken;
         try {
           await registerToken(newToken, platform: _platformName(platform));
@@ -209,6 +206,8 @@ class PushNotifications {
   }
 
   Future<void> unregister({required PushTokenRemover removeToken}) async {
+    await _refreshSubscription?.cancel();
+    _refreshSubscription = null;
     final token = _currentToken;
     if (token == null || token.isEmpty) return;
     try {
@@ -218,7 +217,6 @@ class PushNotifications {
       await FirebaseMessaging.instance.deleteToken();
     } catch (_) {}
     _currentToken = null;
-    _initialized = false;
   }
 
   Future<void> dispose() async {

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -19,7 +20,7 @@ abstract class SessionVault {
 }
 
 class DeviceSessionVault implements SessionVault {
-  DeviceSessionVault(String scope)
+  DeviceSessionVault(this.scope)
     : regular = FlutterSecureStorage(
         aOptions: AndroidOptions(storageNamespace: 'stockfolio.session.$scope'),
         iOptions: IOSOptions(
@@ -46,17 +47,41 @@ class DeviceSessionVault implements SessionVault {
       );
 
   final FlutterSecureStorage regular, protected;
+  final String scope;
+  static const _channel = MethodChannel('stockfolio/biometric_session');
+  bool get usesAndroidPrompt =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  Future<T?> _android<T>(String method, [String? token]) async {
+    try {
+      return await _channel.invokeMethod<T>(method, {
+        'scope': scope,
+        'token': ?token,
+      });
+    } on PlatformException catch (e) {
+      throw SessionUnlockException(
+        e.message ?? 'Biometrics unavailable. Use your password.',
+      );
+    }
+  }
+
   FlutterSecureStorage _store(bool biometric) =>
       biometric ? protected : regular;
   @override
   Future<String?> read({required bool biometric}) =>
-      _store(biometric).read(key: 'access_token');
+      biometric && usesAndroidPrompt
+      ? _android<String>('read')
+      : _store(biometric).read(key: 'access_token');
   @override
   Future<void> write(String token, {required bool biometric}) =>
-      _store(biometric).write(key: 'access_token', value: token);
+      biometric && usesAndroidPrompt
+      ? _android<void>('write', token)
+      : _store(biometric).write(key: 'access_token', value: token);
   @override
   Future<void> delete({required bool biometric}) =>
-      _store(biometric).delete(key: 'access_token');
+      biometric && usesAndroidPrompt
+      ? _android<void>('delete')
+      : _store(biometric).delete(key: 'access_token');
 }
 
 class BiometricSession {
@@ -84,6 +109,10 @@ class BiometricSession {
   bool enabled = false;
   bool prompting = false;
   String get modeKey => 'native_session_mode.$scope';
+  bool get _androidVault =>
+      _vault is DeviceSessionVault &&
+      _vault.usesAndroidPrompt;
+  String get _enrolledMode => _androidVault ? 'biometric_v2' : 'biometric';
 
   static Future<bool> _deviceCanAuthenticate() async {
     final auth = LocalAuthentication();
@@ -106,7 +135,16 @@ class BiometricSession {
     if (!supported) return null;
     final prefs = await SharedPreferences.getInstance();
     final mode = prefs.getString(modeKey);
-    enabled = mode == 'biometric';
+    if (_androidVault && mode == 'biometric') {
+      // Old Android sessions cannot be silently moved across keystore keys.
+      await prefs.setString(modeKey, 'signed_out');
+      await prefs.remove('access_token');
+      await (_vault as DeviceSessionVault).protected.delete(
+        key: 'access_token',
+      );
+      return null;
+    }
+    enabled = mode == _enrolledMode;
     if (enabled) {
       await prefs.remove('access_token');
       return null; // Only unlock() may read the biometric-protected token.
@@ -161,7 +199,8 @@ class BiometricSession {
     }
     await _withPrompt(() async {
       await _vault.write(token, biometric: true);
-      if (await _vault.read(biometric: true) != token) {
+      // Android authenticated the encryption itself; another read would prompt twice.
+      if (!_androidVault && await _vault.read(biometric: true) != token) {
         throw const SessionUnlockException(
           'Biometric storage could not be verified.',
         );
@@ -169,7 +208,7 @@ class BiometricSession {
       await _vault.delete(biometric: false);
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('access_token');
-      await prefs.setString(modeKey, 'biometric');
+      await prefs.setString(modeKey, _enrolledMode);
       enabled = true;
     });
   }
