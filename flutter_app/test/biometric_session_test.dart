@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_app/biometric_session.dart';
 import 'package:flutter_app/biometric_widgets.dart';
@@ -48,6 +49,45 @@ BiometricSession session(
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  test(
+    'Android requests exactly one activity-bound operation per unlock',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      const channel = MethodChannel('stockfolio/biometric_session');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final calls = <String>[];
+      bool cancelled = true;
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(channel, null);
+        debugDefaultTargetPlatformOverride = null;
+      });
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        expect(call.arguments['scope'], 'tester');
+        calls.add(call.method);
+        if (call.method == 'read' && cancelled) {
+          throw PlatformException(
+            code: 'biometric',
+            message: 'Authentication cancelled',
+          );
+        }
+        return call.method == 'read' ? 'verified-session' : null;
+      });
+      final store = BiometricSession(
+        'origin',
+        vault: DeviceSessionVault('tester'),
+      );
+      SharedPreferences.setMockInitialValues({store.modeKey: 'biometric_v2'});
+      expect(await store.restore(), isNull);
+      expect(calls, isEmpty);
+      await expectLater(store.unlock(), throwsA(isA<SessionUnlockException>()));
+      expect(store.prompting, isFalse);
+      cancelled = false;
+      expect(await store.unlock(), 'verified-session');
+      expect(calls, ['read', 'read']);
+    },
+  );
 
   test(
     'native vault requires biometric proof per read and device-bound iOS keys',
@@ -279,7 +319,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byType(SwitchListTile));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Cancel'));
+    await tester.tap(find.text('Not now'));
     await tester.pumpAndSettle();
     expect(store.enabled, isFalse);
     await tester.tap(find.byType(SwitchListTile));
@@ -316,9 +356,14 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('Stockfolio is locked'), findsOneWidget);
     expect(api.hasToken, isFalse);
+    // Native biometric callbacks can complete just before the resumed notification.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.tap(find.text('Unlock with biometrics'));
     await tester.pump(const Duration(milliseconds: 100));
     expect(api.hasToken, isTrue);
+    expect(find.text('Stockfolio is locked'), findsOneWidget);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
     expect(find.text('Stockfolio is locked'), findsNothing);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.pump();

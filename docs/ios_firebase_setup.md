@@ -35,9 +35,9 @@ Then in Firebase Console:
 - Cloud Messaging
 - upload the APNs key
 
-## 4. Build with Firebase iOS dart-defines
+## 4. Build the iOS app
 
-Use the Flutter helper script so the version becomes dotted automatically:
+The bundled plist is sufficient. The Firebase Dart flags in this example are optional overrides:
 
 ```bash
 python3 scripts/flutter_build.py ios --debug --no-codesign \

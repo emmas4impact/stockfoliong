@@ -1,6 +1,29 @@
 import 'package:flutter/material.dart';
 import 'biometric_session.dart';
 
+Future<bool> confirmBiometricSetup(BuildContext context) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Use biometrics next time?'),
+        content: const Text(
+          'Anyone with a supported fingerprint or face enrolled on this device can unlock this account. '
+          'Your password is not saved. You will need it again when your session expires.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Enable'),
+          ),
+        ],
+      ),
+    ) ??
+    false;
+
 class BiometricUnlockScreen extends StatefulWidget {
   const BiometricUnlockScreen({
     super.key,
@@ -131,27 +154,7 @@ class _BiometricSettingsTileState extends State<BiometricSettingsTile> {
 
   Future<void> change(bool enable) async {
     if (enable) {
-      final accepted = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Enable biometric unlock?'),
-          content: const Text(
-            'Anyone with a biometric enrolled on this device can unlock this account. '
-            'Your password is not saved. You will need it again when your session expires.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Enable'),
-            ),
-          ],
-        ),
-      );
-      if (accepted != true || !mounted) return;
+      if (!await confirmBiometricSetup(context) || !mounted) return;
     }
     setState(() {
       busy = true;

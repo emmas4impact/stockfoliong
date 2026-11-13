@@ -360,6 +360,8 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
   bool loading = true;
   bool authenticated = false;
   bool biometricLocked = false;
+  bool unlockOnResume = false;
+  int backgroundGeneration = 0;
   final navigatorKey = GlobalKey<NavigatorState>();
   late String? emailVerificationToken;
   late String? passwordResetToken;
@@ -415,6 +417,16 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      backgroundGeneration++;
+      unlockOnResume = false;
+    }
+    if (state == AppLifecycleState.resumed && unlockOnResume) {
+      unlockOnResume = false;
+      if (api.hasToken && api.biometricSession.enabled) _signedIn();
+      return;
+    }
     if (state != AppLifecycleState.resumed && authenticated &&
         api.biometricSession.enabled && !api.biometricSession.prompting && !biometricLocked) {
       setState(() => biometricLocked = true);
@@ -422,12 +434,22 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
   }
 
   Future<void> _unlockBiometric() async {
+    final generation = backgroundGeneration;
     await api.unlockBiometricSession();
-    if (!mounted || WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
-    setState(() { authenticated = true; biometricLocked = false; });
+    if (!mounted) return;
+    if (generation != backgroundGeneration) {
+      throw const SessionUnlockException('Stockfolio was backgrounded. Please unlock again.');
+    }
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.inactive) {
+      // The system prompt may return its result before the app regains focus.
+      unlockOnResume = true;
+    } else if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      _signedIn();
+    }
   }
 
   Future<void> _usePassword() async {
+    unlockOnResume = false;
     await api.clearToken();
     navigatorKey.currentState?.popUntil((route) => route.isFirst);
     if (mounted) setState(() { authenticated = false; biometricLocked = false; });
@@ -2269,7 +2291,19 @@ class _AuthScreenState extends State<AuthScreen> {
         );
       } else {
         await widget.api.login(email.text.trim(), password.text);
+        if (await widget.api.biometricSession.available() && mounted &&
+            await confirmBiometricSetup(context)) {
+          try {
+            await widget.api.setBiometricUnlock(true);
+          } catch (error) {
+            if (mounted) {
+              showError(context, error is SessionUnlockException
+                  ? error.message : 'Biometrics were not enabled. You can try again in Profile.');
+            }
+          }
+        }
       }
+      if (!mounted) return;
       widget.onSignedIn();
     } catch (error) {
       if (mounted) showError(context, error.toString());
@@ -4416,6 +4450,8 @@ class _AccountScreenState extends State<AccountScreen> {
   MemoryImage? profileImageMemory;
   bool savingProfile = false;
   bool sendingVerification = false;
+  Future<PushRegistrationResult>? refreshedPushSetup;
+  bool refreshingPush = false;
   bool sendingReport = false;
   bool deletingAccount = false;
   bool pickingProfileImage = false;
@@ -4608,13 +4644,21 @@ class _AccountScreenState extends State<AccountScreen> {
   }
 
   Future<void> refreshPushSetup() async {
+    if (refreshingPush) return;
+    final setup = PushNotifications.instance.ensureRegistered(
+      registerToken: widget.api.registerPushToken,
+    );
+    setState(() {
+      refreshingPush = true;
+      refreshedPushSetup = setup;
+    });
     try {
-      final result = await PushNotifications.instance.ensureRegistered(
-        registerToken: widget.api.registerPushToken,
-      );
+      final result = await setup;
       if (mounted) showMessage(context, result.message);
     } catch (error) {
       if (mounted) showError(context, error.toString());
+    } finally {
+      if (mounted) setState(() => refreshingPush = false);
     }
   }
 
@@ -4844,7 +4888,7 @@ class _AccountScreenState extends State<AccountScreen> {
             ),
             const SizedBox(height: 16),
             FutureBuilder<PushRegistrationResult>(
-              future: widget.pushSetupFuture,
+              future: refreshedPushSetup ?? widget.pushSetupFuture,
               builder: (context, snapshot) {
                 final pushResult =
                     snapshot.data ?? PushNotifications.instance.lastResult;
@@ -4876,7 +4920,8 @@ class _AccountScreenState extends State<AccountScreen> {
                         Text(pushResult.message),
                         const SizedBox(height: 12),
                         OutlinedButton.icon(
-                          onPressed: refreshPushSetup,
+                          onPressed: refreshingPush || snapshot.connectionState == ConnectionState.waiting
+                              ? null : refreshPushSetup,
                           icon: const Icon(Icons.notifications_active_outlined),
                           label: const Text('Refresh push setup'),
                         ),

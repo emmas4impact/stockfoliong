@@ -115,6 +115,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('0.41x'), findsOneWidget);
       expect(find.textContaining('Stale'), findsOneWidget);
+      expect(find.textContaining('Valuation snapshot'), findsOneWidget);
+      expect(find.textContaining('Kobo'), findsNothing);
       expect(find.text('FY-2025'), findsOneWidget);
       expect(find.text('NGN 1.2B'), findsOneWidget);
       if (const bool.fromEnvironment('FINANCIALS_PREVIEWS')) {

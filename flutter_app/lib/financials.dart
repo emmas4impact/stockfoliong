@@ -318,7 +318,7 @@ class _Valuation extends StatelessWidget {
           ),
         const SizedBox(height: 8),
         Text(
-          'Kobo fundamentals'
+          'Valuation snapshot'
           '${updated == null ? '' : ' / Updated ${DateFormat.yMMMd().format(updated)}'}'
           '${updated != null || observed == null ? '' : ' / Retrieved ${DateFormat.yMMMd().format(observed)}'}'
           '${freshness == 'stale'
