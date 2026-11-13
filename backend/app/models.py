@@ -4,7 +4,6 @@ from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
-from .personal_data import EncryptedText
 from .settings import get_settings
 
 
@@ -19,18 +18,18 @@ class User(TimestampMixin, Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(EncryptedText("users.email", searchable=True), unique=True, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
-    full_name: Mapped[str | None] = mapped_column(EncryptedText("users.full_name"), nullable=True)
-    profile_image_url: Mapped[str | None] = mapped_column(EncryptedText("users.profile_image_url"), nullable=True)
-    phone: Mapped[str | None] = mapped_column(EncryptedText("users.phone"), nullable=True)
-    address: Mapped[str | None] = mapped_column(EncryptedText("users.address"), nullable=True)
-    city: Mapped[str | None] = mapped_column(EncryptedText("users.city"), nullable=True)
-    country: Mapped[str | None] = mapped_column(EncryptedText("users.country"), nullable=True)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    profile_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(128), nullable=True)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    email_verification_token: Mapped[str | None] = mapped_column(EncryptedText("users.email_verification_token", searchable=True), nullable=True, index=True)
+    email_verification_token: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     email_verification_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    password_reset_token: Mapped[str | None] = mapped_column(EncryptedText("users.password_reset_token", searchable=True), nullable=True, index=True)
+    password_reset_token: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     password_reset_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
 
@@ -148,7 +147,7 @@ class PortfolioHolding(TimestampMixin, Base):
     stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol", ondelete="RESTRICT"), index=True)
     quantity: Mapped[float] = mapped_column(Numeric(20, 4))
     avg_purchase_price: Mapped[float] = mapped_column(Numeric(18, 4))
-    notes: Mapped[str | None] = mapped_column(EncryptedText("portfolio_holdings.notes"), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="holdings")
     stock: Mapped[Stock] = relationship(back_populates="holdings")
@@ -159,9 +158,9 @@ class PushDeviceToken(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    token: Mapped[str] = mapped_column(EncryptedText("push_device_tokens.token", searchable=True), unique=True, index=True)
+    token: Mapped[str] = mapped_column(String(512), unique=True, index=True)
     platform: Mapped[str] = mapped_column(String(32), index=True)
-    device_label: Mapped[str | None] = mapped_column(EncryptedText("push_device_tokens.device_label"), nullable=True)
+    device_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     last_registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -186,7 +185,7 @@ class AccountDeletionRequest(TimestampMixin, Base):
     __tablename__ = "account_deletion_requests"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    email: Mapped[str] = mapped_column(EncryptedText("account_deletion_requests.email", searchable=True), index=True)
-    reason: Mapped[str | None] = mapped_column(EncryptedText("account_deletion_requests.reason"), nullable=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(32), default="web")
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)

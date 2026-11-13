@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,7 +8,6 @@ class Settings(BaseSettings):
     app_name: str = "Stockfolio API"
     database_url: str = Field(validation_alias="DATABASE_URL")
     jwt_secret_key: str = Field(validation_alias="JWT_SECRET_KEY")
-    personal_data_key: SecretStr | None = Field(default=None, validation_alias="PERSONAL_DATA_KEY")
     jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
     access_token_expire_minutes: int = Field(default=60 * 24 * 7, validation_alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     cors_origins: str = Field(

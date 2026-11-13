@@ -63,23 +63,16 @@ POSTGRES_USER=your-local-db-user
 POSTGRES_PASSWORD=your-local-db-password
 DATABASE_URL=postgresql+psycopg://your-local-db-user:your-local-db-password@postgres:5432/ngx_dash
 JWT_SECRET_KEY=replace-with-a-long-random-secret
-PERSONAL_DATA_KEY=replace-with-base64url-encoded-64-random-bytes
 CORS_ORIGINS=http://localhost:8080,http://localhost:3000
 ADMIN_EMAILS=you@example.com
 ```
 
 Keep `.env` out of git. Railway should use Railway Variables for these same values, not committed files.
 
-3. Provision and back up the server-only encryption key, then initialise the
-database before starting the API. For an existing database, stop all writers
-and take a backup first. Follow [the encryption deployment guide](docs/personal_data_encryption.md).
+3. Start Postgres and the API:
 
 ```bash
-docker compose up -d postgres
-docker compose build api
-docker compose run --rm --no-deps api python scripts/encrypt_personal_data.py
-docker compose run --rm --no-deps api python scripts/encrypt_personal_data.py --apply --confirm-database ngx_dash
-docker compose up -d api
+docker compose up --build
 ```
 
 The API runs at:
@@ -193,7 +186,6 @@ Set backend variables in Railway, not in code:
 ```text
 DATABASE_URL=<Railway Postgres connection URL>
 JWT_SECRET_KEY=<long random secret>
-PERSONAL_DATA_KEY=<base64url-encoded 64 random bytes, server only>
 CORS_ORIGINS=https://your-frontend-domain
 ADMIN_EMAILS=you@example.com
 ```

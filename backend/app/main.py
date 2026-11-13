@@ -20,7 +20,6 @@ from .analysis import latest_observations, score_observation
 from .models import StockAnalysis
 from .legal import render_account_deletion_html, render_privacy_policy_html
 from .models import AccountDeletionRequest, PortfolioHolding, PushDeviceToken, Stock, StockPrice, User
-from .personal_data_migration import configure_storage
 from .notifications import portfolio_report_pdf, send_email
 from .ngx_client import (
     NgxFetchError,
@@ -605,14 +604,14 @@ def ensure_runtime_schema() -> None:
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superuser BOOLEAN NOT NULL DEFAULT false"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image_url TEXT"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS city TEXT"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS country TEXT"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(64)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS address VARCHAR(255)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS city VARCHAR(128)"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS country VARCHAR(128)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT false"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_token TEXT"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_token VARCHAR(128)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_sent_at TIMESTAMPTZ"))
-        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token TEXT"))
+        conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token VARCHAR(128)"))
         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_sent_at TIMESTAMPTZ"))
         conn.execute(
             text("CREATE INDEX IF NOT EXISTS ix_users_email_verification_token ON users(email_verification_token)")
@@ -654,8 +653,6 @@ def ensure_runtime_schema() -> None:
 @app.on_event("startup")
 async def startup() -> None:
     global stock_sync_task
-    with engine.connect() as conn:
-        configure_storage(conn)
     Base.metadata.create_all(bind=engine)
     ensure_runtime_schema()
     if settings.enable_background_stock_sync:
