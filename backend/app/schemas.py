@@ -1,6 +1,7 @@
 from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from .financials import FinancialsOut
 
 
 class RegisterRequest(BaseModel):
@@ -233,6 +234,7 @@ class MarketOfferOut(BaseModel):
 
 
 class StockDetailOut(BaseModel):
+    financials: FinancialsOut = Field(default_factory=FinancialsOut)
     stock: StockOut
     history: list[StockPriceOut]
     market_snapshot: MarketSnapshotOut | None = None

@@ -19,6 +19,7 @@ import 'profile_image_picker_stub.dart'
     if (dart.library.html) 'profile_image_picker_web.dart';
 import 'stock_logo_assets.dart';
 import 'sector_valuation.dart';
+import 'financials.dart';
 
 part 'portfolio_view.dart';
 part 'market_view.dart';
@@ -1437,6 +1438,7 @@ class StockDetailBundle {
     required this.dividends,
     required this.disclosures,
     this.offers = const [],
+    this.financials = const FinancialsData(),
   });
 
   final Stock stock;
@@ -1447,6 +1449,7 @@ class StockDetailBundle {
   final List<DividendRecord> dividends;
   final List<DisclosureItem> disclosures;
   final List<MarketOffer> offers;
+  final FinancialsData financials;
 
   factory StockDetailBundle.fromJson(Map<String, dynamic> json) {
     final historyJson = json['history'] as List<dynamic>? ?? const [];
@@ -1474,6 +1477,7 @@ class StockDetailBundle {
           .map((item) => DisclosureItem.fromJson(item as Map<String, dynamic>))
           .toList(),
       offers: MarketOffer.parseList(json['offers'] as List? ?? const []),
+      financials: FinancialsData.fromJson(json['financials'] as Map<String, dynamic>? ?? {}),
     );
   }
 }
@@ -1893,6 +1897,22 @@ class MarketOffer {
       MarketOffer(row['name'] as String, row['kind'] as String,
         row['status'] as String, DateTime.tryParse(row['next_date'] as String? ?? ''),
         row['url'] as String),
+  ];
+}
+
+List<FinancialReportLink> financialReportLinks(List<DisclosureItem> filings) {
+  final seen = <String>{};
+  return [
+    for (final filing in filings)
+      if (filing.url != null &&
+          Uri.tryParse(filing.url!)?.scheme == 'https' &&
+          RegExp(r'financial statement|annual report|audited.*result|earnings release', caseSensitive: false)
+              .hasMatch('${filing.category ?? ''} ${filing.title ?? ''}') &&
+          seen.add(filing.url!))
+        FinancialReportLink(
+          (filing.title ?? '').trim().isEmpty ? 'Financial statement' : filing.title!,
+          filing.url!,
+        ),
   ];
 }
 
@@ -3024,6 +3044,16 @@ class _LandingStockDetailSheetState extends State<LandingStockDetailSheet> {
                     ],
                   ),
                   if (widget.showValuation) ...[
+                    const SizedBox(height: 18),
+                    EarningsFinancialsSection(
+                      key: ValueKey('financials-${widget.stock.symbol}'),
+                      symbol: widget.stock.symbol,
+                      data: detail?.financials ?? const FinancialsData(),
+                      reports: financialReportLinks(disclosures),
+                      onOpenReport: (url) => openExternalUrl(context, url),
+                      loading: loading,
+                      failed: snapshot.hasError,
+                    ),
                     const SizedBox(height: 18),
                     SectorValuationSection(
                       symbol: widget.stock.symbol,
@@ -5414,6 +5444,16 @@ class PortfolioHoldingDetail extends StatelessWidget {
                 SectorValuationSection(
                   symbol: holding!.symbol,
                   load: api.sectorValuation,
+                ),
+                const SizedBox(height: 18),
+                EarningsFinancialsSection(
+                  key: ValueKey('financials-${holding!.symbol}'),
+                  symbol: holding!.symbol,
+                  data: detail?.financials ?? const FinancialsData(),
+                  reports: financialReportLinks(disclosures),
+                  onOpenReport: (url) => openExternalUrl(context, url),
+                  loading: loading,
+                  failed: snapshot.hasError,
                 ),
                 const SizedBox(height: 18),
                 Text(

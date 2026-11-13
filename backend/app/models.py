@@ -97,6 +97,15 @@ class FundamentalObservation(Base):
     inputs: Mapped[dict] = mapped_column(JSON)
 
 
+class FinancialStatement(TimestampMixin, Base):
+    __tablename__ = "financial_statements"
+
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), primary_key=True)
+    period_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+
 class StockAnalysis(Base):
     __tablename__ = "stock_analyses"
 

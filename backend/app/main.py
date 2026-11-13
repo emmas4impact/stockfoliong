@@ -17,7 +17,8 @@ from sqlalchemy.orm import Session, selectinload
 from .auth import create_access_token, get_current_superuser, get_current_user, hash_password, verify_password
 from .database import Base, SessionLocal, engine, get_db
 from .analysis import latest_observations, score_observation
-from .models import StockAnalysis
+from .models import FinancialStatement, StockAnalysis
+from .financials import FinancialsOut, StatementInput, get_financials
 from .legal import render_account_deletion_html, render_privacy_policy_html
 from .models import AccountDeletionRequest, PortfolioHolding, PushDeviceToken, Stock, StockPrice, User
 from .notifications import portfolio_report_pdf, send_email
@@ -1318,11 +1319,32 @@ def build_stock_detail(
         "history": rows,
         "market_snapshot": market_snapshot,
         "history_source": stock_history_source(stock),
+        "financials": get_financials(db, stock.symbol),
         "news": news,
         "dividends": dividends,
         "disclosures": disclosures,
         "offers": offers,
     }
+
+
+@app.put("/admin/stocks/{symbol}/financial-statements", response_model=FinancialsOut)
+def put_financial_statement(
+    symbol: str,
+    statement: StatementInput,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_superuser),
+):
+    symbol = symbol.strip().upper()
+    if db.get(Stock, symbol) is None:
+        raise HTTPException(status_code=404, detail="Stock not found")
+    row = db.get(FinancialStatement, (symbol, statement.storage_key))
+    if row is None:
+        row = FinancialStatement(stock_symbol=symbol, period_key=statement.storage_key)
+        db.add(row)
+    row.payload = statement.model_dump(mode="json")
+    row.reviewed_by = admin.id
+    db.commit()
+    return get_financials(db, symbol)
 
 
 @app.get("/public/stocks/{symbol}/detail", response_model=StockDetailOut, include_in_schema=False)
