@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from .auth import create_access_token, get_current_superuser, get_current_user, hash_password, verify_password
 from .database import Base, SessionLocal, engine, get_db
 from .analysis import latest_observations, score_observation
-from .models import FinancialStatement, StockAnalysis
+from .models import FinancialStatement, StockAnalysis, StockLogo
 from .financials import FinancialsOut, StatementInput, get_financials
 from .legal import render_account_deletion_html, render_privacy_policy_html
 from .models import AccountDeletionRequest, PortfolioHolding, PushDeviceToken, Stock, StockPrice, User
@@ -675,7 +675,12 @@ def health() -> dict[str, str]:
 
 
 @app.get("/public/stocks/{symbol}/logo", include_in_schema=False)
-def public_stock_logo(symbol: str) -> Response:
+def public_stock_logo(symbol: str, db: Session = Depends(get_db)) -> Response:
+    symbol = symbol.strip().upper()
+    saved = db.get(StockLogo, symbol)
+    if saved is not None:
+        return Response(content=saved.png, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
     try:
         logo = fetch_stock_logo(symbol)
     except NgxFetchError as exc:
