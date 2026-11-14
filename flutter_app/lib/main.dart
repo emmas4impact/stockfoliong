@@ -25,6 +25,7 @@ import 'biometric_widgets.dart';
 
 part 'portfolio_view.dart';
 part 'market_view.dart';
+part 'valuation_signals_view.dart';
 
 final apiBaseUrl = normalizeApiBaseUrl(configuredApiBaseUrl());
 const _themeModePreferenceKey = 'theme_mode';
@@ -4442,6 +4443,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   }
                   if (ideas == null || ideas.ideas.isEmpty) {
                     return MarketIdeasPanel(
+                      onSelect: _openStockDetail,
                       bundle:
                           ideas ??
                           MarketIdeasBundle(
@@ -4454,7 +4456,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           'No setups are standing out right now, but this panel stays here and refreshes with the next sync.',
                     );
                   }
-                  return MarketIdeasPanel(bundle: ideas);
+                  return MarketIdeasPanel(bundle: ideas, onSelect: _openStockDetail);
                 },
               ),
               const SizedBox(height: 16),
@@ -5361,11 +5363,12 @@ class _PortfolioScreenState extends State<PortfolioScreen> {
 }
 
 class CompanyLogo extends StatelessWidget {
-  const CompanyLogo({super.key, required this.symbol, this.size = 40, this.useInitials = false});
+  const CompanyLogo({super.key, required this.symbol, this.size = 40, this.useInitials = false, this.showFullMark = false});
 
   final String symbol;
   final double size;
   final bool useInitials;
+  final bool showFullMark;
 
   @override
   Widget build(BuildContext context) {
@@ -5390,10 +5393,10 @@ class CompanyLogo extends StatelessWidget {
 
     Widget remoteLogo() {
       return Image.network(
-        stockLogoUrl(symbol),
+        stockLogoUrl(symbol.trim().toUpperCase()),
         width: size,
         height: size,
-        fit: BoxFit.cover,
+        fit: showFullMark ? BoxFit.contain : BoxFit.cover,
         gaplessPlayback: true,
         errorBuilder: (context, error, stackTrace) => fallback,
         loadingBuilder: (context, child, loadingProgress) {
@@ -5411,13 +5414,19 @@ class CompanyLogo extends StatelessWidget {
             stockLogoAssetPath(normalizedSymbol),
             width: size,
             height: size,
-            fit: BoxFit.cover,
+            fit: showFullMark ? BoxFit.contain : BoxFit.cover,
             gaplessPlayback: true,
             errorBuilder: (context, error, stackTrace) => remoteLogo(),
           )
         : remoteLogo();
 
-    return ClipOval(child: logo);
+    if (!showFullMark) return ClipOval(child: logo);
+    return Container(
+      width: size, height: size, padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: colorScheme.outlineVariant)),
+      child: logo,
+    );
   }
 }
 
@@ -7420,12 +7429,13 @@ class ProfileAvatar extends StatelessWidget {
 }
 
 class MarketIdeasPanel extends StatelessWidget {
-  const MarketIdeasPanel({super.key, required this.bundle, this.emptyMessage});
+  const MarketIdeasPanel({super.key, required this.bundle, this.emptyMessage, this.onSelect});
+  final ValueChanged<Stock>? onSelect;
   final MarketIdeasBundle bundle;
   final String? emptyMessage;
   @override
   Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-    _ValuationSignals(signals: bundle.signals),
+    _ValuationSignals(signals: bundle.signals, onSelect: onSelect),
     const SizedBox(height: 16),
     Text('Market ideas', style: Theme.of(context).textTheme.titleLarge),
     Text('${bundle.stocksAnalyzed} stocks analysed', style: Theme.of(context).textTheme.bodySmall),
@@ -7433,7 +7443,7 @@ class MarketIdeasPanel extends StatelessWidget {
     if (bundle.ideas.isEmpty) Text(emptyMessage ?? 'No qualifying stocks.')
     else Material(color: Theme.of(context).colorScheme.surface, child: Column(children: [
       for (final idea in bundle.ideas) ExpansionTile(
-        key: PageStorageKey('idea-${idea.stock.symbol}'), leading: CompanyLogo(symbol: idea.stock.symbol, size: 32, useInitials: true),
+        key: PageStorageKey('idea-${idea.stock.symbol}'), leading: CompanyLogo(symbol: idea.stock.symbol, size: 40, useInitials: true, showFullMark: true),
         title: Text(idea.stock.symbol), subtitle: Text(idea.stock.name ?? ''),
         trailing: Text('Score ${idea.score.toStringAsFixed(1)}'),
         childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -7452,42 +7462,6 @@ class MarketIdeasPanel extends StatelessWidget {
   ]);
 }
 
-class _ValuationSignals extends StatefulWidget {
-  const _ValuationSignals({required this.signals});
-  final List<ValuationSignal> signals;
-  @override
-  State<_ValuationSignals> createState() => _ValuationSignalsState();
-}
-
-class _ValuationSignalsState extends State<_ValuationSignals> {
-  String? selection;
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final label = selection ?? (widget.signals.isEmpty ? 'Buy' : widget.signals.first.label);
-    final rows = widget.signals.where((s) => s.label == label);
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('Valuation signals', style: theme.textTheme.titleLarge),
-      Text('Buy: both P/E and P/B at least 20% below sector peer medians. '
-          'Sell: both at least 20% above. Hold: neither condition. Research only.',
-          style: theme.textTheme.bodySmall),
-      const SizedBox(height: 8),
-      SegmentedButton<String>(
-        segments: [for (final s in ['Buy', 'Hold', 'Sell']) ButtonSegment(value: s, label: Text(s))],
-        selected: {label}, onSelectionChanged: (s) => setState(() => selection = s.single),
-      ),
-      const SizedBox(height: 8),
-      if (rows.isEmpty) Text(widget.signals.isEmpty
-          ? 'No signals with current positive ratios and at least three comparable peers.'
-          : 'No qualifying ${label.toLowerCase()} signals.'),
-      for (final s in rows) ListTile(contentPadding: EdgeInsets.zero,
-        title: Text('${s.symbol} · ${s.sector}'),
-        subtitle: Text('P/E ${s.pe.toStringAsFixed(2)}x · P/B ${s.pb.toStringAsFixed(2)}x\n'
-          'Median of ${s.peerCount} peers: ${s.peerPe.toStringAsFixed(2)}x / ${s.peerPb.toStringAsFixed(2)}x'
-          ' · ${DateFormat.yMMMd().format(s.asOf)}')),
-    ]);
-  }
-}
 
 class StockTile extends StatelessWidget {
   const StockTile({

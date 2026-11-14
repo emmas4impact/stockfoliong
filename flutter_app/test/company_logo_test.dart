@@ -32,4 +32,14 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('recommended issuers show the full bundled mark without a network request', (tester) async {
+    for (final symbol in ['ACCESSCORP', 'CILEASING', 'UHREIT', 'LEARNAFRCA']) {
+      await tester.pumpWidget(MaterialApp(home: CompanyLogo(symbol: symbol, showFullMark: true)));
+      await tester.pumpAndSettle();
+      final image = tester.widget<Image>(find.byType(Image));
+      expect((image.image as AssetImage).assetName, stockLogoAssetPath(symbol));
+      expect(image.fit, BoxFit.contain);
+    }
+  });
 }
