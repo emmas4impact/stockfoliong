@@ -30,6 +30,28 @@ def statement(year=2025, **changes):
 
 
 class FinancialsTests(unittest.TestCase):
+    def test_home_peer_signals_use_current_positive_multiples(self):
+        engine = create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        now = datetime.now(timezone.utc)
+        with Session(engine) as db:
+            for symbol, sector, pe, pb, age in [
+                ("CHEAP", "Banks", 8, .8, 0), ("MID", "Banks", 10, 1, 0),
+                ("FLAT", "banks", 10, 1, 0), ("HIGH", "Banks", 12, 1.2, 0),
+                ("STALE", "Banks", 2, .1, 8), ("LOSS", "Banks", -1, .3, 0),
+                ("MISSING", "Banks", 10, None, 0), ("ALONE", "Energy", 1, .2, 0),
+            ]:
+                db.add(Stock(symbol=symbol, sector=sector, last_price=10, open_price=10))
+                db.add(FundamentalObservation(observation_key=symbol, stock_symbol=symbol,
+                    source="ngxpulse", observed_at=now, inputs={"fundamentals": {
+                        "pe_ratio": pe, "pb_ratio": pb, "updated_at": (now-timedelta(days=age)).isoformat()}}))
+            db.commit()
+            data = main.MarketIdeasOut.model_validate(main.market_ideas_payload(db, 4))
+            self.assertEqual({s.symbol: s.signal for s in data.valuation_signals},
+                             {"CHEAP": "Buy", "MID": "Hold", "FLAT": "Hold", "HIGH": "Sell"})
+            self.assertTrue(all(s.peer_count == 3 for s in data.valuation_signals))
+
     def test_only_comparable_positive_baselines_have_growth(self):
         previous = statement(2024, metrics={"revenue": 1000, "total_equity": -10, "eps": 0})
         result = statement_history([previous, statement()])[0]

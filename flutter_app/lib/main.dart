@@ -348,8 +348,9 @@ Future<void> main() async {
 }
 
 class NgxPortfolioApp extends StatefulWidget {
-  const NgxPortfolioApp({super.key, this.api});
+  const NgxPortfolioApp({super.key, this.api, this.now = DateTime.now});
   final ApiClient? api;
+  final DateTime Function() now;
 
   @override
   State<NgxPortfolioApp> createState() => _NgxPortfolioAppState();
@@ -361,6 +362,9 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
   bool authenticated = false;
   bool biometricLocked = false;
   bool unlockOnResume = false;
+  DateTime? backgroundedAt;
+  bool privacyCover = false;
+  Timer? passwordExpiry;
   int backgroundGeneration = 0;
   final navigatorKey = GlobalKey<NavigatorState>();
   late String? emailVerificationToken;
@@ -380,6 +384,7 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
     final prefs = await SharedPreferences.getInstance();
     try { await api.restoreToken(); } catch (_) { /* Fail closed; password sign-in remains available. */ }
     final savedThemeMode = prefs.getString(_themeModePreferenceKey);
+    if (_passwordExpired) await api.clearToken();
     if (!mounted) return;
     setState(() {
       authenticated = api.hasToken;
@@ -391,6 +396,7 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
       };
       loading = false;
     });
+    _schedulePasswordExpiry();
   }
 
   Future<void> _setThemeMode(ThemeMode nextMode) async {
@@ -406,36 +412,67 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
   }
 
   void _signedIn() {
+    backgroundedAt = null;
     setState(() { authenticated = true; biometricLocked = false; });
+    _schedulePasswordExpiry();
+  }
+
+  bool get _passwordExpired {
+    final expiry = api.nativeExpiry;
+    return expiry != null && !widget.now().isBefore(expiry);
+  }
+
+  void _schedulePasswordExpiry() {
+    passwordExpiry?.cancel();
+    final expiry = api.nativeExpiry;
+    if (expiry != null) {
+      passwordExpiry = Timer(expiry.difference(widget.now()), _usePassword);
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    passwordExpiry?.cancel();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!api.biometricSession.supported) return;
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
       backgroundGeneration++;
       unlockOnResume = false;
+      if (authenticated && api.biometricSession.enabled) backgroundedAt ??= widget.now();
     }
-    if (state == AppLifecycleState.resumed && unlockOnResume) {
+    if (state == AppLifecycleState.resumed) {
+      final away = backgroundedAt;
+      backgroundedAt = null;
+      if (_passwordExpired) {
+        _usePassword();
+        return;
+      }
+      setState(() {
+        privacyCover = false;
+        if (away != null && widget.now().difference(away) >= const Duration(minutes: 5)
+            && api.biometricSession.enabled) biometricLocked = true;
+      });
+      if (unlockOnResume && api.hasToken && api.biometricSession.enabled) _signedIn();
       unlockOnResume = false;
-      if (api.hasToken && api.biometricSession.enabled) _signedIn();
-      return;
-    }
-    if (state != AppLifecycleState.resumed && authenticated &&
-        api.biometricSession.enabled && !api.biometricSession.prompting && !biometricLocked) {
-      setState(() => biometricLocked = true);
+    } else if (authenticated && api.biometricSession.enabled && !biometricLocked && !privacyCover) {
+      setState(() => privacyCover = true);
     }
   }
 
   Future<void> _unlockBiometric() async {
     final generation = backgroundGeneration;
-    await api.unlockBiometricSession();
+    try {
+      await api.unlockBiometricSession();
+    } on SessionUnlockException {
+      if (mounted && !api.biometricSession.enabled && !api.hasToken) await _usePassword();
+      rethrow;
+    }
     if (!mounted) return;
     if (generation != backgroundGeneration) {
       throw const SessionUnlockException('Stockfolio was backgrounded. Please unlock again.');
@@ -449,10 +486,12 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
   }
 
   Future<void> _usePassword() async {
+    passwordExpiry?.cancel();
+    backgroundedAt = null;
     unlockOnResume = false;
     await api.clearToken();
     navigatorKey.currentState?.popUntil((route) => route.isFirst);
-    if (mounted) setState(() { authenticated = false; biometricLocked = false; });
+    if (mounted) setState(() { authenticated = false; biometricLocked = false; privacyCover = false; });
   }
 
   Future<void> _signOut() async {
@@ -496,7 +535,8 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
     return MaterialApp(
       navigatorKey: navigatorKey,
       builder: (context, child) => Stack(children: [
-        Offstage(offstage: biometricLocked, child: child),
+        Offstage(offstage: biometricLocked || privacyCover, child: child),
+        if (privacyCover && !biometricLocked) Positioned.fill(child: ColoredBox(color: Theme.of(context).colorScheme.surface)),
         if (biometricLocked) Positioned.fill(child: BiometricUnlockScreen(
           onUnlock: _unlockBiometric, onPassword: _usePassword,
         )),
@@ -696,6 +736,20 @@ class ApiClient {
   int _sessionRevision = 0;
 
   bool get hasToken => _token != null && _token!.isNotEmpty;
+
+  // Only schedules the local sign-in screen. The API verifies the signed JWT.
+  DateTime? get nativeExpiry {
+    if (!biometricSession.supported) return null;
+    final parts = _token?.split('.');
+    if (parts == null || parts.length != 3) return null;
+    try {
+      final payload = jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))));
+      final exp = payload is Map ? payload['exp'] : null;
+      return exp is int ? DateTime.fromMillisecondsSinceEpoch(exp * 1000, isUtc: true) : null;
+    } on FormatException {
+      return null;
+    }
+  }
 
   Future<void> restoreToken() async {
     final prefs = await SharedPreferences.getInstance();
@@ -1635,16 +1689,20 @@ class MarketIdeasBundle {
     required this.ideas,
     required this.stocksAnalyzed,
     this.generatedAt,
+    this.signals = const [],
   });
 
   final String disclaimer;
   final List<MarketIdea> ideas;
   final int stocksAnalyzed;
   final DateTime? generatedAt;
+  final List<ValuationSignal> signals;
 
   factory MarketIdeasBundle.fromJson(Map<String, dynamic> json) {
     final ideasJson = json['ideas'] as List<dynamic>? ?? const [];
     return MarketIdeasBundle(
+      signals: (json['valuation_signals'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>().map(ValuationSignal.fromJson).toList(),
       disclaimer: json['disclaimer']?.toString() ?? '',
       ideas: ideasJson
           .map((item) => MarketIdea.fromJson(item as Map<String, dynamic>))
@@ -1655,6 +1713,19 @@ class MarketIdeasBundle {
           : DateTime.tryParse(json['generated_at'] as String),
     );
   }
+}
+
+class ValuationSignal {
+  ValuationSignal.fromJson(Map<String, dynamic> row)
+      : label = row['signal'] as String, symbol = row['symbol'] as String,
+        sector = row['sector'] as String, peerCount = row['peer_count'] as int,
+        pe = (row['pe'] as num).toDouble(), pb = (row['pb'] as num).toDouble(),
+        peerPe = (row['peer_pe'] as num).toDouble(), peerPb = (row['peer_pb'] as num).toDouble(),
+        asOf = DateTime.parse(row['as_of'] as String);
+  final String label, symbol, sector;
+  final int peerCount;
+  final double pe, pb, peerPe, peerPb;
+  final DateTime asOf;
 }
 
 class HoldingInput {
@@ -4366,7 +4437,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         stocksAnalyzed: 0,
                       ),
                       emptyMessage:
-                          'Potential buy setups are temporarily unavailable. Pull to refresh after the next market sync.',
+                          'Market ideas are temporarily unavailable.',
                     );
                   }
                   if (ideas == null || ideas.ideas.isEmpty) {
@@ -7354,6 +7425,8 @@ class MarketIdeasPanel extends StatelessWidget {
   final String? emptyMessage;
   @override
   Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+    _ValuationSignals(signals: bundle.signals),
+    const SizedBox(height: 16),
     Text('Market ideas', style: Theme.of(context).textTheme.titleLarge),
     Text('${bundle.stocksAnalyzed} stocks analysed', style: Theme.of(context).textTheme.bodySmall),
     const SizedBox(height: 8),
@@ -7367,6 +7440,7 @@ class MarketIdeasPanel extends StatelessWidget {
         expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (idea.priceToEarningsRatio != null) Text('P/E  ${idea.priceToEarningsRatio!.toStringAsFixed(1)}'),
+          if (idea.priceToBookRatio != null) Text('P/B  ${idea.priceToBookRatio!.toStringAsFixed(2)}'),
           for (final reason in idea.rationale) Text(reason),
           if ((idea.webSummary ?? '').isNotEmpty) Text(idea.webSummary!),
           if ((idea.fundamentalNote ?? '').isNotEmpty) Text(idea.fundamentalNote!),
@@ -7376,6 +7450,43 @@ class MarketIdeasPanel extends StatelessWidget {
     const SizedBox(height: 8),
     Text(bundle.disclaimer, style: Theme.of(context).textTheme.bodySmall),
   ]);
+}
+
+class _ValuationSignals extends StatefulWidget {
+  const _ValuationSignals({required this.signals});
+  final List<ValuationSignal> signals;
+  @override
+  State<_ValuationSignals> createState() => _ValuationSignalsState();
+}
+
+class _ValuationSignalsState extends State<_ValuationSignals> {
+  String? selection;
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final label = selection ?? (widget.signals.isEmpty ? 'Buy' : widget.signals.first.label);
+    final rows = widget.signals.where((s) => s.label == label);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('Valuation signals', style: theme.textTheme.titleLarge),
+      Text('Buy: both P/E and P/B at least 20% below sector peer medians. '
+          'Sell: both at least 20% above. Hold: neither condition. Research only.',
+          style: theme.textTheme.bodySmall),
+      const SizedBox(height: 8),
+      SegmentedButton<String>(
+        segments: [for (final s in ['Buy', 'Hold', 'Sell']) ButtonSegment(value: s, label: Text(s))],
+        selected: {label}, onSelectionChanged: (s) => setState(() => selection = s.single),
+      ),
+      const SizedBox(height: 8),
+      if (rows.isEmpty) Text(widget.signals.isEmpty
+          ? 'No signals with current positive ratios and at least three comparable peers.'
+          : 'No qualifying ${label.toLowerCase()} signals.'),
+      for (final s in rows) ListTile(contentPadding: EdgeInsets.zero,
+        title: Text('${s.symbol} · ${s.sector}'),
+        subtitle: Text('P/E ${s.pe.toStringAsFixed(2)}x · P/B ${s.pb.toStringAsFixed(2)}x\n'
+          'Median of ${s.peerCount} peers: ${s.peerPe.toStringAsFixed(2)}x / ${s.peerPb.toStringAsFixed(2)}x'
+          ' · ${DateFormat.yMMMd().format(s.asOf)}')),
+    ]);
+  }
 }
 
 class StockTile extends StatelessWidget {

@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from .financials import FinancialsOut
@@ -262,11 +263,24 @@ class MarketIdeaOut(BaseModel):
     fundamental_note: str | None = None
 
 
+class ValuationSignalOut(BaseModel):
+    signal: Literal["Buy", "Hold", "Sell"]
+    symbol: str
+    sector: str
+    pe: float
+    pb: float
+    peer_pe: float
+    peer_pb: float
+    peer_count: int
+    as_of: datetime
+
+
 class MarketIdeasOut(BaseModel):
     disclaimer: str
     generated_at: datetime | None = None
     stocks_analyzed: int = 0
     ideas: list[MarketIdeaOut]
+    valuation_signals: list[ValuationSignalOut] = Field(default_factory=list)
 
 
 class PushStatusOut(BaseModel):
