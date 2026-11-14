@@ -37,7 +37,8 @@ void main() {
     for (final symbol in ['ACCESSCORP', 'CILEASING', 'UHREIT', 'LEARNAFRCA',
       'HMCALL', 'AFRIPRUD', 'FIDSON', 'GEREGU', 'JAIZBANK', 'NAHCO',
       'REDSTAREX', 'SKYAVN', 'VFDGROUP', 'TIP', 'STERLINGNG',
-      'HONYFLOUR', 'FIRSTHOLDCO']) {
+      'HONYFLOUR', 'FIRSTHOLDCO', 'ZICHIS', 'UNILEVER', 'TRANSCORP',
+      'STANBIC', 'FTNCOCOA', 'BUACEMENT', 'NEM', 'UCAP', 'ETI']) {
       await tester.pumpWidget(MaterialApp(home: CompanyLogo(symbol: symbol, showFullMark: true)));
       await tester.pumpAndSettle();
       final image = tester.widget<Image>(find.byType(Image));
