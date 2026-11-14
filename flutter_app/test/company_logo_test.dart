@@ -34,7 +34,10 @@ void main() {
   });
 
   testWidgets('recommended issuers show the full bundled mark without a network request', (tester) async {
-    for (final symbol in ['ACCESSCORP', 'CILEASING', 'UHREIT', 'LEARNAFRCA']) {
+    for (final symbol in ['ACCESSCORP', 'CILEASING', 'UHREIT', 'LEARNAFRCA',
+      'HMCALL', 'AFRIPRUD', 'FIDSON', 'GEREGU', 'JAIZBANK', 'NAHCO',
+      'REDSTAREX', 'SKYAVN', 'VFDGROUP', 'TIP', 'STERLINGNG',
+      'HONYFLOUR', 'FIRSTHOLDCO']) {
       await tester.pumpWidget(MaterialApp(home: CompanyLogo(symbol: symbol, showFullMark: true)));
       await tester.pumpAndSettle();
       final image = tester.widget<Image>(find.byType(Image));

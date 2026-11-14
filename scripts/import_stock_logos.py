@@ -17,7 +17,8 @@ BUNDLED = ROOT / "flutter_app/assets/company_logos"
 def reviewed_logos():
     logos = {path.stem: (path, "Stockfolio curated asset") for path in BUNDLED.glob("*.png")}
     for ticker, source in json.loads((REVIEWED / "sources.json").read_text()).items():
-        logos[ticker] = (REVIEWED / f"{ticker}.png", source)
+        path = REVIEWED / f"{ticker}.png"
+        logos[ticker] = (path if path.is_file() else BUNDLED / f"{ticker}.png", source)
     return logos
 
 
