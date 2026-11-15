@@ -177,8 +177,12 @@ def home_valuations(db, stocks, limit):
 
 def get_financials(db, symbol):
     # A newer quote-only observation must not hide a previous successful valuation.
+    metrics = FundamentalObservation.inputs["fundamentals"]
     observation = db.scalar(select(FundamentalObservation).where(
-        FundamentalObservation.stock_symbol == symbol, has_valuation(),
+        FundamentalObservation.stock_symbol == symbol,
+        (metrics["pb_ratio"].as_string().is_not(None)
+         | metrics["pe_ratio"].as_string().is_not(None)
+         | metrics["eps"].as_string().is_not(None)),
     ).order_by(FundamentalObservation.observed_at.desc(), FundamentalObservation.id.desc()).limit(1))
     rows = db.scalars(select(FinancialStatement).where(FinancialStatement.stock_symbol == symbol))
     statements = [StatementInput.model_validate(row.payload) for row in rows]

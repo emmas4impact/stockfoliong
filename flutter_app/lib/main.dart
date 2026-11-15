@@ -363,9 +363,6 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
   bool authenticated = false;
   bool biometricLocked = false;
   bool unlockOnResume = false;
-  DateTime? backgroundedAt;
-  bool privacyCover = false;
-  Timer? passwordExpiry;
   int backgroundGeneration = 0;
   final navigatorKey = GlobalKey<NavigatorState>();
   late String? emailVerificationToken;
@@ -440,40 +437,25 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (!api.biometricSession.supported) return;
     if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
       backgroundGeneration++;
       unlockOnResume = false;
-      if (authenticated && api.biometricSession.enabled) backgroundedAt ??= widget.now();
     }
-    if (state == AppLifecycleState.resumed) {
-      final away = backgroundedAt;
-      backgroundedAt = null;
-      if (_passwordExpired) {
-        _usePassword();
-        return;
-      }
-      setState(() {
-        privacyCover = false;
-        if (away != null && widget.now().difference(away) >= const Duration(minutes: 5)
-            && api.biometricSession.enabled) biometricLocked = true;
-      });
-      if (unlockOnResume && api.hasToken && api.biometricSession.enabled) _signedIn();
+    if (state == AppLifecycleState.resumed && unlockOnResume) {
       unlockOnResume = false;
-    } else if (authenticated && api.biometricSession.enabled && !biometricLocked && !privacyCover) {
-      setState(() => privacyCover = true);
+      if (api.hasToken && api.biometricSession.enabled) _signedIn();
+      return;
+    }
+    if (state != AppLifecycleState.resumed && authenticated &&
+        api.biometricSession.enabled && !api.biometricSession.prompting && !biometricLocked) {
+      setState(() => biometricLocked = true);
     }
   }
 
   Future<void> _unlockBiometric() async {
     final generation = backgroundGeneration;
-    try {
-      await api.unlockBiometricSession();
-    } on SessionUnlockException {
-      if (mounted && !api.biometricSession.enabled && !api.hasToken) await _usePassword();
-      rethrow;
-    }
+    await api.unlockBiometricSession();
     if (!mounted) return;
     if (generation != backgroundGeneration) {
       throw const SessionUnlockException('Stockfolio was backgrounded. Please unlock again.');
@@ -487,8 +469,6 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
   }
 
   Future<void> _usePassword() async {
-    passwordExpiry?.cancel();
-    backgroundedAt = null;
     unlockOnResume = false;
     await api.clearToken();
     navigatorKey.currentState?.popUntil((route) => route.isFirst);
