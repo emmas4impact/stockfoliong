@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, selectinload
 from .auth import create_access_token, get_current_superuser, get_current_user, hash_password, verify_password
 from .database import Base, SessionLocal, engine, get_db
 from .analysis import latest_observations, score_observation
+from .data_quality import data_quality_report
 from .models import FinancialStatement, StockAnalysis, StockLogo
 from .financials import FinancialsOut, StatementInput, get_financials, home_valuations
 from .legal import render_account_deletion_html, render_privacy_policy_html
@@ -1391,6 +1392,13 @@ def run_stock_sync(
         status=sync_state,
         message=message,
     )
+
+
+@app.get("/admin/analysis/data-quality")
+def get_analysis_data_quality(
+    db: Session = Depends(get_db), _: User = Depends(get_current_superuser),
+) -> dict:
+    return data_quality_report(db)
 
 
 @app.get("/admin/sync/status", response_model=SyncStatusOut)
