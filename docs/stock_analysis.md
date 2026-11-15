@@ -91,6 +91,34 @@ log in with an admin account. This requests one stock sync without chart-history
 backfill and rejects cached or seeded results. Otherwise the existing scheduled
 sync is sufficient. Assess coverage by sector before exposing the score in Flutter.
 
+## Read-only data quality audit
+
+Admins can request `GET /admin/analysis/data-quality` or run:
+
+```sh
+python3 scripts/check_analysis_coverage.py https://ngx-api.up.railway.app --data-quality
+```
+
+This requires the updated backend and an admin login. It performs no provider
+requests or database writes. Do not add `--sync` unless you explicitly intend to
+refresh the database before auditing it. The original checker without this flag
+still works with a normal account.
+
+The report includes all database symbols, per-sector coverage and per-symbol
+issues: missing observations, unavailable P/E scores, stale/unknown valuations,
+missing reporting/publication dates, invalid statement records, comparable
+revenue/EPS Y/Y pairs, and the extent of saved prices and analysis history.
+Zero P/E scores count as covered. Latest usable valuations remain visible even
+after a newer quote-only observation. Counters use all listed symbols as the
+denominator; issue counts overlap. An empty database has null percentages.
+
+This audit does not certify accounting accuracy or forecast readiness. Statement
+checks use the existing reviewed-input validator and period comparability rules;
+Y/Y comparisons can refer to older periods. Saved history is not a backtest.
+Provider update timestamps must not be mistaken for earnings publication dates.
+The report is a rolling read, not a transactionally frozen snapshot. No schema
+migration, scoring-rule change, or mobile/web rebuild is needed.
+
 ## Next milestone
 
 Confirm NGXPulse's historical fundamentals fields and commercial storage rights.

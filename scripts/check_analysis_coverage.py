@@ -76,6 +76,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("api_base")
     parser.add_argument("--sync", action="store_true", help="Request one stock sync first (admin only)")
+    parser.add_argument("--data-quality", action="store_true",
+                        help="Audit stored valuations, reporting dates and statements (admin only; read-only)")
     args = parser.parse_args()
     base = args.api_base.rstrip("/")
     url = urlsplit(base)
@@ -105,6 +107,10 @@ def main():
         if (result["status"] != "success" or result["source"] not in {"ngxpulse", "ngx_doclib"}
                 or result["stocks_upserted"] < 1):
             raise RuntimeError("No live-provider sync confirmed; not reporting old data as a fresh run.")
+    if args.data_quality:
+        print("Auditing stored data without calling the market provider...", file=sys.stderr)
+        print(json.dumps(call("/admin/analysis/data-quality"), indent=2))
+        return
     print("Checking listed stocks sequentially...", file=sys.stderr)
     report = check_coverage(call)
     print(json.dumps(report, indent=2))

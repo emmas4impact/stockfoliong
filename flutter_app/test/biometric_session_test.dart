@@ -352,7 +352,8 @@ void main() {
       }),
     );
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-    await tester.pumpWidget(NgxPortfolioApp(api: api));
+    var now = DateTime.utc(2026, 11, 14);
+    await tester.pumpWidget(NgxPortfolioApp(api: api, now: () => now));
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('Stockfolio is locked'), findsOneWidget);
     expect(api.hasToken, isFalse);
@@ -367,10 +368,44 @@ void main() {
     expect(find.text('Stockfolio is locked'), findsNothing);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.pump();
-    expect(find.text('Stockfolio is locked'), findsOneWidget);
     expect(find.byType(DashboardShell), findsNothing);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    now = now.add(const Duration(minutes: 4, seconds: 59));
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(find.byType(DashboardShell), findsOneWidget);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    now = now.add(const Duration(minutes: 5));
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(find.text('Stockfolio is locked'), findsOneWidget);
     await tester.tap(find.text('Use password instead'));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('Sign in'), findsOneWidget);
+    expect(api.hasToken, isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('resuming at token expiry requires password, not a new biometric session', (tester) async {
+    var now = DateTime.utc(2026, 11, 14);
+    final expires = now.add(const Duration(days: 7));
+    final claims = base64Url.encode(utf8.encode(jsonEncode({'exp': expires.millisecondsSinceEpoch ~/ 1000})));
+    final store = session(MemoryVault());
+    await store.savePasswordSession('header.$claims.signature');
+    final api = ApiClient('https://api.example.test', biometricSession: store,
+        client: MockClient((_) async => http.Response('{}', 503)));
+    await tester.pumpWidget(NgxPortfolioApp(api: api, now: () => now));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(api.nativeExpiry, expires);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    now = expires.subtract(const Duration(seconds: 1));
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(api.hasToken, isTrue);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    now = expires;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('Sign in'), findsOneWidget);
     expect(api.hasToken, isFalse);

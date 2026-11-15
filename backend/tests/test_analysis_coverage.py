@@ -1,9 +1,11 @@
 import io
 import json
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 
-from scripts.check_analysis_coverage import check_coverage
+from scripts.check_analysis_coverage import check_coverage, main
 
 
 def unavailable(detail):
@@ -12,6 +14,29 @@ def unavailable(detail):
 
 
 class CoverageTest(unittest.TestCase):
+    def test_data_quality_cli_only_logs_in_and_reads_audit(self):
+        paths = []
+        class Opener:
+            def open(self, request, timeout):
+                path = urlsplit(request.full_url).path
+                paths.append((request.get_method(), path))
+                if path == "/auth/login":
+                    return io.BytesIO(b'{"access_token":"test-token"}')
+                self_header = request.get_header("Authorization")
+                if self_header != "Bearer test-token":
+                    raise AssertionError("Missing authorization")
+                return io.BytesIO(b'{"listed":0,"stocks":[]}')
+        output = io.StringIO()
+        with patch("sys.argv", ["checker", "https://example.test", "--data-quality"]), \
+             patch("scripts.check_analysis_coverage.build_opener", return_value=Opener()), \
+             patch("builtins.input", return_value="admin@example.test"), \
+             patch("scripts.check_analysis_coverage.getpass", return_value="unused"), \
+             patch("sys.stdout", output), patch("sys.stderr", io.StringIO()):
+            main()
+        self.assertEqual(paths, [("POST", "/auth/login"), ("GET", "/admin/analysis/data-quality")])
+        self.assertEqual(json.loads(output.getvalue()), {"listed": 0, "stocks": []})
+        self.assertNotIn("test-token", output.getvalue())
+
     def test_reports_full_universe_and_checks_history(self):
         def call(path):
             if path == "/stocks":

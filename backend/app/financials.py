@@ -1,12 +1,13 @@
 """Reviewed statements and explicitly dated provider valuations, never PDF guesses."""
 
 from datetime import date, datetime, timedelta, timezone
+from statistics import median
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, HttpUrl, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from .analysis import finite_number, utc
+from .analysis import MAX_AGE, MIN_PEERS, finite_number, utc
 from .models import FinancialStatement, FundamentalObservation
 
 
@@ -131,6 +132,47 @@ def statement_history(statements):
             yoy[key] = round(growth, 2) if growth is not None else None
         results.append(StatementOut(**statement.model_dump(), period_key=statement.storage_key, yoy=yoy))
     return results
+
+
+def has_valuation():
+    metrics = FundamentalObservation.inputs["fundamentals"]
+    return (metrics["pb_ratio"].as_string().is_not(None)
+         | metrics["pe_ratio"].as_string().is_not(None)
+         | metrics["eps"].as_string().is_not(None))
+
+
+def home_valuations(db, stocks, limit):
+    now = datetime.now(timezone.utc)
+    obs = FundamentalObservation
+    ranked = select(obs.id, func.row_number().over(
+        partition_by=obs.stock_symbol, order_by=(obs.observed_at.desc(), obs.id.desc())
+    ).label("position")).where(has_valuation(), obs.observed_at >= now - MAX_AGE).subquery()
+    rows = db.scalars(select(obs).join(ranked, ranked.c.id == obs.id).where(ranked.c.position == 1))
+    snapshots = {row.stock_symbol: valuation_snapshot(row, now) for row in rows}
+    sectors = {}
+    for stock in stocks:
+        value = snapshots.get(stock.symbol)
+        sector = (stock.sector or "").strip().casefold()
+        if (sector not in {"", "unknown", "other", "n/a", "unclassified"} and value
+                and value.freshness == "current" and (value.pe_ratio or 0) > 0 and (value.pb_ratio or 0) > 0):
+            sectors.setdefault(sector, []).append((stock, value))
+    signals = []
+    for group in sectors.values():
+        if len(group) <= MIN_PEERS:
+            continue
+        for stock, value in group:
+            peers = [v for s, v in group if s.symbol != stock.symbol]
+            pe, pb = median(v.pe_ratio for v in peers), median(v.pb_ratio for v in peers)
+            a, b = value.pe_ratio / pe, value.pb_ratio / pb
+            signal = "Buy" if max(a, b) <= 0.8 else "Sell" if min(a, b) >= 1.2 else "Hold"
+            # Rank within each screen by agreement, not the unrelated momentum score.
+            distance = max(a, b) if signal == "Buy" else -min(a, b) if signal == "Sell" else max(abs(a-1), abs(b-1))
+            signals.append((distance, dict(signal=signal, symbol=stock.symbol, sector=stock.sector.strip(),
+                pe=value.pe_ratio, pb=value.pb_ratio, peer_pe=pe, peer_pb=pb, peer_count=len(peers),
+                as_of=value.provider_updated_at)))
+    ordered = sorted(signals, key=lambda pair: (pair[0], pair[1]["symbol"]))
+    return snapshots, [row for label in ("Buy", "Hold", "Sell")
+                       for row in [item for _, item in ordered if item["signal"] == label][:limit]]
 
 
 def get_financials(db, symbol):

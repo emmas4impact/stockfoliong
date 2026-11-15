@@ -326,6 +326,7 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
             turnover_values.append(tr)
     sorted_turnovers = sorted(turnover_values)
 
+    valuations, signals = home_valuations(db, stocks, limit)
     candidates: list[dict] = []
     for stock in stocks:
         current_price = float(stock.last_price) if stock.last_price is not None else None
@@ -427,7 +428,7 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
                 "rationale": rationale[:5],
                 "web_summary": None,
                 "price_to_earnings_ratio": None if pe_ratio_val is None else round(pe_ratio_val, 2),
-                "price_to_book_ratio": None,
+                "price_to_book_ratio": valuations[stock.symbol].pb_ratio if stock.symbol in valuations else None,
                 "fundamental_note": fund_note,
                 "ngx_id": stock.ngx_id,
             }
@@ -469,6 +470,7 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
         "generated_at": datetime.now(timezone.utc),
         "stocks_analyzed": len(stocks),
         "ideas": enriched[:limit],
+        "valuation_signals": signals,
     }
 
 
@@ -1389,6 +1391,13 @@ def run_stock_sync(
         status=sync_state,
         message=message,
     )
+
+
+@app.get("/admin/analysis/data-quality")
+def get_analysis_data_quality(
+    db: Session = Depends(get_db), _: User = Depends(get_current_superuser),
+) -> dict:
+    return data_quality_report(db)
 
 
 @app.get("/admin/sync/status", response_model=SyncStatusOut)
