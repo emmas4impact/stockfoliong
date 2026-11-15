@@ -3173,9 +3173,7 @@ class _LandingStockDetailSheetState extends State<LandingStockDetailSheet> {
                         ),
                   const SizedBox(height: 8),
                   Text(
-                    detail?.historySource == 'ngxpulse_history'
-                        ? 'Powered by NGX Pulse historical daily prices and cached inside Stockfolio.'
-                        : 'Chart history is loaded from the available market data feed for this stock.',
+                    'Powered by NGX',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -5578,9 +5576,7 @@ class PortfolioHoldingDetail extends StatelessWidget {
                       ),
                 const SizedBox(height: 8),
                 Text(
-                  detail?.historySource == 'ngxpulse_history'
-                      ? 'Powered by NGX Pulse historical daily prices and cached inside Stockfolio.'
-                      : 'Chart history is loaded from the available market data feed for this stock.',
+                  'Powered by NGX',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
@@ -7888,6 +7884,46 @@ class _PriceChartState extends State<PriceChart> {
           return DateFormat.yMMMd().format(value);
         }
 
+        Widget bottomTitle(double value, TitleMeta meta) {
+          final index = value.round();
+          if (index < 0 ||
+              index >= displayPoints.length ||
+              !bottomLabelIndices.contains(index)) {
+            return const SizedBox.shrink();
+          }
+          final label = chartDateLabel(displayPoints[index].date);
+          return SideTitleWidget(
+            key: ValueKey((
+              value,
+              label,
+              axisLabelStyle,
+              MediaQuery.textScalerOf(context),
+            )),
+            meta: meta,
+            fitInside: SideTitleFitInsideData.fromTitleMeta(
+              meta,
+              distanceFromEdge: 4,
+            ),
+            child: Text(label, style: axisLabelStyle, maxLines: 1),
+          );
+        }
+
+        final bottomTitles = AxisTitles(
+          sideTitles: SideTitles(
+            showTitles: true,
+            reservedSize: max(
+              34,
+              MediaQuery.textScalerOf(context).scale(
+                        axisLabelStyle?.fontSize ?? 11,
+                      ) *
+                      1.5 +
+                  16,
+            ),
+            interval: 1,
+            getTitlesWidget: bottomTitle,
+          ),
+        );
+
         return Container(
           decoration: BoxDecoration(
             color: chartSurface,
@@ -8046,6 +8082,7 @@ class _PriceChartState extends State<PriceChart> {
               ],
               const SizedBox(height: 14),
               Container(
+                key: const ValueKey('price-chart-plot'),
                 height: chartHeight,
                 padding: const EdgeInsets.fromLTRB(4, 14, 4, 4),
                 decoration: BoxDecoration(
@@ -8128,29 +8165,7 @@ class _PriceChartState extends State<PriceChart> {
                             ),
                           ),
                         ),
-                        bottomTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 34,
-                            interval: 1,
-                            getTitlesWidget: (value, meta) {
-                              final index = value.round();
-                              if (index < 0 ||
-                                  index >= displayPoints.length ||
-                                  !bottomLabelIndices.contains(index)) {
-                                return const SizedBox.shrink();
-                              }
-                              final point = displayPoints[index];
-                              return Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Text(
-                                  chartDateLabel(point.date),
-                                  style: axisLabelStyle,
-                                ),
-                              );
-                            },
-                          ),
-                        ),
+                        bottomTitles: bottomTitles,
                       ),
                       lineBarsData: [
                         LineChartBarData(
@@ -8227,29 +8242,7 @@ class _PriceChartState extends State<PriceChart> {
                             ),
                           ),
                         ),
-                        bottomTitles: AxisTitles(
-                          sideTitles: SideTitles(
-                            showTitles: true,
-                            reservedSize: 34,
-                            interval: 1,
-                            getTitlesWidget: (value, meta) {
-                              final index = value.round();
-                              if (index < 0 ||
-                                  index >= displayPoints.length ||
-                                  !bottomLabelIndices.contains(index)) {
-                                return const SizedBox.shrink();
-                              }
-                              final point = displayPoints[index];
-                              return Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Text(
-                                  chartDateLabel(point.date),
-                                  style: axisLabelStyle,
-                                ),
-                              );
-                            },
-                          ),
-                        ),
+                        bottomTitles: bottomTitles,
                       ),
                       barGroups: [
                         for (var i = 0; i < displayPoints.length; i++)
