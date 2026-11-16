@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 
 from .analysis import MAX_AGE, latest_observations, score_observation, utc
 from .financials import StatementInput, has_valuation, statement_history, valuation_snapshot
+from .instrument_reference import COMPANY_SHARES, REFERENCE_DATE, REFERENCE_URL, instrument_class
 from .models import FinancialStatement, FundamentalObservation, Stock, StockAnalysis, StockPrice
 
 
@@ -128,7 +129,7 @@ def data_quality_report(db, now=None):
         counts["with_reviewed_statements"] += int(bool(valid_statements))
         issue_counts.update(issues)
         rows.append({
-            "symbol": stock.symbol, "sector": sector,
+            "symbol": stock.symbol, "sector": sector, "instrument_class": instrument_class(stock.symbol),
             "pe_scored": scored, "pe_score_reasons": result["reasons"] if result and not scored else [],
             "pe_freshness": result["freshness"] if result else None,
             "observed_at": utc(observation.observed_at).isoformat() if observation else None,
@@ -146,10 +147,25 @@ def data_quality_report(db, now=None):
             "issues": sorted(issues),
         })
     total = len(rows)
-    def coverage(count):
-        return {"count": count, "percent": round(100 * count / total, 1) if total else None}
+    def coverage(count, denominator=total):
+        return {"count": count, "percent": round(100 * count / denominator, 1) if denominator else None}
+    equities = [r for r in rows if r["instrument_class"] == "company_share"]
+    unverified = [r["symbol"] for r in rows if r["instrument_class"] == "unverified"]
     return {
         "generated_at": now.isoformat(), "listed": total,
+        "instrument_audit": {
+            "reference_date": REFERENCE_DATE, "reference_url": REFERENCE_URL,
+            "stored_company_shares": len(equities),
+            "stored_funds_or_trusts": sum(r["instrument_class"] == "fund_or_trust" for r in rows),
+            "unverified_symbols": unverified,
+            "reference_company_shares_not_in_db": sorted(
+                COMPANY_SHARES - {r["symbol"].strip().upper() for r in equities}
+            ),
+            "stored_company_share_coverage": {
+                "pe_scored": coverage(sum(r["pe_scored"] for r in equities), len(equities)),
+                "current_positive_pe_pb": coverage(sum(r["current_positive_pe_pb"] for r in equities), len(equities)),
+            },
+        },
         "coverage": {
             "pe_scored": coverage(sum(row["pe_scored"] for row in rows)),
             "current_positive_pe_pb": coverage(sum(row["current_positive_pe_pb"] for row in rows)),
@@ -160,7 +176,8 @@ def data_quality_report(db, now=None):
         "issues_may_overlap": dict(sorted(issue_counts.items())),
         "by_sector": dict(sorted(sectors.items())), "stocks": rows,
         "limitations": [
-            "Coverage uses every stock record in this database, not a verified equities-only universe.",
+            "Top-level coverage uses every stored stock record. Instrument audit coverage uses only stored company shares matched to the dated reference.",
+            "Unmatched symbols need review, not automatic exclusion or delisting. Instrument classifications do not change scores or peers.",
             "Provider update and receipt dates do not establish earnings publication dates.",
             "Statement validation checks structure and comparability, not independent accounting accuracy.",
             "Available Y/Y pairs may be historical; their latest reporting date is shown separately.",

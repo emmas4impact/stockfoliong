@@ -50,6 +50,23 @@ class DataQualityTests(unittest.TestCase):
         self.assertEqual(report["listed"], 0)
         self.assertEqual(report["stocks"], [])
         self.assertEqual(report["coverage"]["pe_scored"], {"count": 0, "percent": None})
+        self.assertIsNone(report["instrument_audit"]["stored_company_share_coverage"]["pe_scored"]["percent"])
+
+    def test_dated_reference_separates_share_coverage_from_all_record_coverage(self):
+        for symbol in ["ACCESSCORP", "TIP", "UHREIT", "NIDF", "FG123UNKNOWN"]:
+            self.db.add(Stock(symbol=symbol))
+            if symbol != "TIP":
+                self.observation(symbol)
+        self.db.commit()
+        report = data_quality_report(self.db, self.now)
+        audit = report["instrument_audit"]
+        self.assertEqual(report["coverage"]["pe_scored"], {"count": 4, "percent": 80.0})
+        self.assertEqual(audit["stored_company_shares"], 2)
+        self.assertEqual(audit["stored_funds_or_trusts"], 2)
+        self.assertEqual(audit["unverified_symbols"], ["FG123UNKNOWN"])
+        self.assertEqual(audit["stored_company_share_coverage"]["pe_scored"], {"count": 1, "percent": 50.0})
+        self.assertNotIn("TIP", audit["reference_company_shares_not_in_db"])
+        self.assertIn("UBA", audit["reference_company_shares_not_in_db"])
 
     def test_full_universe_coverage_and_no_writes(self):
         for symbol in ["A", "B", "C", "D", "EMPTY"]:
