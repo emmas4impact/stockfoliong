@@ -7352,8 +7352,31 @@ class MarketIdeasPanel extends StatelessWidget {
         ],
       ),
     ])),
-    const SizedBox(height: 8),
-    Text(bundle.disclaimer, style: Theme.of(context).textTheme.bodySmall),
+    const SizedBox(height: 16),
+    Container(
+      key: const ValueKey('market-ideas-disclaimer'),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        border: Border(left: BorderSide(
+          color: Theme.of(context).colorScheme.primary,
+          width: 4,
+        )),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(Icons.info_outline_rounded,
+          color: Theme.of(context).colorScheme.primary, size: 24),
+        const SizedBox(width: 12),
+        Expanded(child: Text(
+          bundle.disclaimer.trim().isEmpty ? _marketIdeasFallbackDisclaimer : bundle.disclaimer,
+          style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+            color: Theme.of(context).colorScheme.onSurface,
+            fontWeight: FontWeight.w700,
+            height: 1.5,
+          ),
+        )),
+      ]),
+    ),
   ]);
 }
 
