@@ -38,15 +38,17 @@ class KoboSyncTests(unittest.TestCase):
         self.get.return_value.status_code = 200
 
     def test_bulk_join_and_saved_sector_score(self):
+        now = datetime.now(timezone.utc).isoformat()
         rows = [{"symbol": " gtco ", "pe_ratio": 5.6, "eps": 21.39, "forward_pe": 4.73,
-                 "pb_ratio": 1.26, "updated_at": "2026-11-08T05:02:25.76+00:00",
+                 "pb_ratio": 1.26, "updated_at": now,
                  "extra": {"book_value_per_share": 94.45}},
                 {"symbol": "FORWARD", "forward_pe": 3.1, "pe_ratio": None},
-                {"symbol": "BANK3", "pe_ratio": -2}, {"symbol": "BANK2", "pe_ratio": 7},
-                {"symbol": "BANK1", "pe_ratio": 6}]
+                {"symbol": "BANK3", "pe_ratio": -2}, {"symbol": "BANK2", "pe_ratio": 7, "updated_at": now},
+                {"symbol": "BANK1", "pe_ratio": 6, "updated_at": now},
+                {"symbol": "UNMATCHED", "pe_ratio": 8, "updated_at": now}]
         self.get.return_value.json.return_value = {"success": True, "count": len(rows), "fundamentals": rows}
         result = services.sync_stocks(self.db)
-        self.assertIn("5/6", result[-1])
+        self.assertIn("6/6", result[-1])
         self.get.assert_called_once_with("https://koboterminal.com/api/ngxdata/fundamentals",
                                          headers={"X-API-Key": "test"}, timeout=20, allow_redirects=False)
         results = {r.stock_symbol: r.result for r in self.db.scalars(select(StockAnalysis))}
@@ -74,6 +76,52 @@ class KoboSyncTests(unittest.TestCase):
         self.get.return_value.json.return_value = {"success": False, "fundamentals": []}
         with self.assertRaises(ngx_client.NgxFetchError):
             ngx_client.fetch_kobo_fundamentals()
+
+    def test_mixed_batch_rechecks_hourly_and_keeps_quota_backoff(self):
+        now = datetime.now(timezone.utc)
+        self.get.return_value.json.return_value = {"success": True, "fundamentals": [
+            {"symbol": "GTCO", "pe_ratio": 5, "pb_ratio": 1, "updated_at": now.isoformat()},
+            {"symbol": "BANK1", "pe_ratio": 8, "pb_ratio": 1,
+             "updated_at": (now - timedelta(days=8)).isoformat()},
+        ]}
+        first = services.sync_stocks(self.db)
+        self.assertIn("1 current, 1 stale, 0 unknown", first[-1])
+        self.assertIn("refresh interval 1h", first[-1])
+        original = get_financials(self.db, "BANK1").valuation
+        self.assertEqual(original.freshness, "stale")
+        services.sync_stocks(self.db)
+        self.assertEqual(self.get.call_count, 1)
+        batch = services.get_cached_dict_payload(self.db, services.FUNDAMENTALS_CACHE_KEY)
+        batch["received_at"] = (now - timedelta(hours=2)).isoformat()
+        services.cache_api_payload(self.db, cache_key=services.FUNDAMENTALS_CACHE_KEY, payload=batch)
+        self.db.commit()
+        self.get.return_value.status_code = 429
+        self.assertIn("429", services.sync_stocks(self.db)[-1])
+        self.assertIn("backoff", services.sync_stocks(self.db)[-1])
+        self.assertEqual(self.get.call_count, 2)
+        self.assertEqual(get_financials(self.db, "BANK1").valuation, original)
+
+    def test_complete_batch_keeps_daily_cache_and_original_receipt(self):
+        now = datetime.now(timezone.utc)
+        self.get.return_value.json.return_value = {"success": True, "fundamentals": [
+            {"symbol": "GTCO", "pe_ratio": 5, "updated_at": now.isoformat()},
+        ]}
+        first = services._fundamentals_for_sync(self.db)
+        batch = services.get_cached_dict_payload(self.db, services.FUNDAMENTALS_CACHE_KEY)
+        received = (now - timedelta(hours=2)).isoformat()
+        batch["received_at"] = received
+        services.cache_api_payload(self.db, cache_key=services.FUNDAMENTALS_CACHE_KEY, payload=batch)
+        self.db.commit()
+        second = services._fundamentals_for_sync(self.db)
+        self.assertEqual(self.get.call_count, 1)
+        self.assertEqual(second, (first[0], received))
+
+    def test_unknown_and_stale_batches_do_not_trigger_hourly_polling(self):
+        now = datetime.now(timezone.utc)
+        for updated in [None, "invalid", (now - timedelta(days=8)).isoformat()]:
+            status = services.fundamentals_batch_status({"A": {"updated_at": updated}}, now, now)
+            self.assertFalse(status["mixed_freshness"])
+            self.assertEqual(status["refresh_interval_seconds"], 86400)
 
     def test_quota_failure_keeps_committed_snapshot_and_receipt_time(self):
         self.get.return_value.json.return_value = {"success": True, "fundamentals": [

@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.database import Base
 from backend.app.models import FundamentalObservation, Stock, StockAnalysis
-from backend.app.analysis import archive_sync_analysis, latest_observations, record_observation, score_observation
+from backend.app.analysis import MODEL_VERSION, archive_sync_analysis, latest_observations, record_observation, score_observation
 
 
 class AnalysisTests(unittest.TestCase):
@@ -30,7 +30,9 @@ class AnalysisTests(unittest.TestCase):
             self.db.add(Stock(symbol=symbol))
             self.db.flush()
         record_observation(self.db, {"symbol": symbol, "last_price": 20, "pe_ratio": pe,
-                                    "sector": sector, "source": source}, self.now - timedelta(days=age))
+                                    "sector": sector, "source": source,
+                                    "fundamentals": {"pe_ratio": pe, "updated_at": self.now.isoformat()}},
+                           self.now - timedelta(days=age))
 
     def result(self, symbol="ABC"):
         rows = latest_observations(self.db)
@@ -82,7 +84,57 @@ class AnalysisTests(unittest.TestCase):
         saved = self.db.scalar(select(StockAnalysis).where(StockAnalysis.stock_symbol == "ABC"))
         self.assertEqual(saved.result["scores"]["valuation"], 100)
         self.assertEqual(len(saved.result["peer_inputs"]), 3)
-        self.assertEqual(saved.model_version, "sector-pe-v1")
+        self.assertEqual(saved.model_version, MODEL_VERSION)
+
+    def test_old_provider_data_cannot_be_refreshed_by_receiving_it_again(self):
+        for symbol in ["ABC", "B", "C", "D", "E"]:
+            self.add(symbol, 10)
+        rows = latest_observations(self.db)
+        target = next(row for row in rows if row.stock_symbol == "ABC")
+        for updated, expected in [((self.now - timedelta(days=8)).isoformat(), "stale"),
+                                  ((self.now + timedelta(seconds=1)).isoformat(), "stale"),
+                                  (None, "unknown"), ("invalid", "unknown")]:
+            target.inputs = {**target.inputs, "fundamentals": {"pe_ratio": 10, "updated_at": updated}}
+            result = score_observation(target, rows, self.now)
+            self.assertEqual(result["freshness"], expected)
+            self.assertIsNone(result["scores"]["valuation"])
+            other = next(row for row in rows if row.stock_symbol == "B")
+            peer_result = score_observation(other, rows, self.now)
+            self.assertEqual(peer_result["peer_count"], 3)
+            self.assertNotIn("ABC", [p["symbol"] for p in peer_result["peer_inputs"]])
+
+    def test_receipt_age_boundary_and_unverifiable_stock_list_pe(self):
+        for symbol in ["ABC", "B", "C", "D"]:
+            self.add(symbol, 10)
+        rows = latest_observations(self.db)
+        target = next(row for row in rows if row.stock_symbol == "ABC")
+        original = target.inputs
+        for receipt, expected in [((self.now - timedelta(days=7)).isoformat(), "current"),
+                                   ((self.now - timedelta(days=7, seconds=1)).isoformat(), "stale"),
+                                   ((self.now + timedelta(seconds=1)).isoformat(), "stale"),
+                                   ("invalid", "unknown"), (None, "unknown")]:
+            target.inputs = {**original, "fundamentals_received_at": receipt}
+            result = score_observation(target, rows, self.now)
+            self.assertEqual(result["freshness"], expected)
+            self.assertEqual(result["scores"]["valuation"] is not None, expected == "current")
+        for metrics in [None, {"pe_ratio": None}, {"pe_ratio": 11, "updated_at": self.now.isoformat()}]:
+            target.inputs = {**original, "fundamentals": metrics}
+            self.assertIsNone(score_observation(target, rows, self.now)["scores"]["valuation"])
+
+    def test_old_archive_remains_unchanged_when_v2_is_saved(self):
+        for symbol in ["ABC", "B", "C", "D"]:
+            self.add(symbol, 10)
+        target = latest_observations(self.db)[0]
+        old = StockAnalysis(analysis_key="v1-archive", stock_symbol=target.stock_symbol,
+                            observation_id=target.id, model_version="sector-pe-v1",
+                            generated_at=self.now, result={"scores": {"valuation": 99}})
+        self.db.add(old)
+        self.db.commit()
+        archive_sync_analysis(self.db)
+        self.db.commit()
+        self.db.refresh(old)
+        self.assertEqual(old.result, {"scores": {"valuation": 99}})
+        self.assertEqual(self.db.scalar(select(func.count()).select_from(StockAnalysis)), 5)
 
 
 if __name__ == "__main__":

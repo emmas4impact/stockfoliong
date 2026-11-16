@@ -30,7 +30,8 @@ class DataQualityTests(unittest.TestCase):
 
     def observation(self, symbol, **changes):
         fields = dict(observation_key=symbol, stock_symbol=symbol, source="ngxpulse",
-                      observed_at=self.now, inputs={"sector": "banks", "pe_ratio": 10})
+                      observed_at=self.now, inputs={"sector": "banks", "pe_ratio": 10,
+                          "fundamentals": {"pe_ratio": 10, "updated_at": self.now.isoformat()}})
         fields.update(changes)
         row = FundamentalObservation(**fields)
         self.db.add(row)
@@ -50,14 +51,15 @@ class DataQualityTests(unittest.TestCase):
         self.assertEqual(report["stocks"], [])
         self.assertEqual(report["coverage"]["pe_scored"], {"count": 0, "percent": None})
 
-    def test_full_universe_latest_usable_valuation_and_no_writes(self):
+    def test_full_universe_coverage_and_no_writes(self):
         for symbol in ["A", "B", "C", "D", "EMPTY"]:
             self.db.add(Stock(symbol=symbol, sector="Banks"))
         for symbol in ["A", "B", "C", "D"]:
             row = self.observation(symbol)
             if symbol == "A":
                 # The highest P/E earns a valid zero score, not a missing score.
-                row.inputs = {"sector": "banks", "pe_ratio": 20}
+                row.inputs = {"sector": "banks", "pe_ratio": 20,
+                              "fundamentals": {"pe_ratio": 20, "pb_ratio": 1, "updated_at": self.now.isoformat()}}
         old = self.observation("A", observation_key="older-fundamentals",
             observed_at=self.now - timedelta(days=1), inputs={"fundamentals": {
                 "pe_ratio": 20, "pb_ratio": 1, "updated_at": self.now.isoformat()}})
@@ -83,6 +85,19 @@ class DataQualityTests(unittest.TestCase):
         self.assertEqual(a["price_history"]["rows"], 1)
         self.assertEqual(set(queries), {"SELECT"})
         self.assertEqual(len(queries), 6)
+
+    def test_quote_only_observation_preserves_display_but_not_confirmed_score(self):
+        self.db.add(Stock(symbol="A"))
+        self.observation("A", observation_key="valuation", observed_at=self.now - timedelta(days=1),
+                         inputs={"fundamentals": {"pe_ratio": 10, "pb_ratio": 1,
+                                                 "updated_at": self.now.isoformat()}})
+        self.observation("A", inputs={"pe_ratio": 10})
+        self.db.commit()
+        row = data_quality_report(self.db, self.now)["stocks"][0]
+        self.assertEqual(row["valuation"]["pe_ratio"], 10)
+        self.assertTrue(row["current_positive_pe_pb"])
+        self.assertEqual(row["pe_freshness"], "unknown")
+        self.assertFalse(row["pe_scored"])
 
     def test_stale_unknown_invalid_and_future_metadata(self):
         cases = {

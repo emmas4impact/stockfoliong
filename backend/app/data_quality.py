@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
-from .analysis import latest_observations, score_observation, utc
+from .analysis import MAX_AGE, latest_observations, score_observation, utc
 from .financials import StatementInput, has_valuation, statement_history, valuation_snapshot
 from .models import FinancialStatement, FundamentalObservation, Stock, StockAnalysis, StockPrice
 
@@ -54,8 +54,10 @@ def data_quality_report(db, now=None):
         result = score_observation(observation, universe, now) if observation else None
         if observation is None:
             issues.add("missing_observation")
-        elif result["stale"]:
+        elif not now - MAX_AGE <= utc(observation.observed_at) <= now:
             issues.add("stale_or_future_observation")
+        if result and result["freshness"] != "current":
+            issues.add("pe_freshness_" + result["freshness"])
         scored = result is not None and result["scores"]["valuation"] is not None
         if not scored:
             issues.add("pe_score_unavailable")
@@ -128,6 +130,7 @@ def data_quality_report(db, now=None):
         rows.append({
             "symbol": stock.symbol, "sector": sector,
             "pe_scored": scored, "pe_score_reasons": result["reasons"] if result and not scored else [],
+            "pe_freshness": result["freshness"] if result else None,
             "observed_at": utc(observation.observed_at).isoformat() if observation else None,
             "valuation": snapshot.model_dump(mode="json") if snapshot else None,
             "current_positive_pe_pb": current_pe_pb,
