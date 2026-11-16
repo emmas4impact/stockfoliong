@@ -23,6 +23,7 @@ import 'stock_logo_assets.dart';
 import 'sector_valuation.dart';
 import 'financials.dart';
 import 'web_idle_timeout.dart';
+import 'mobile_updates.dart';
 import 'biometric_session.dart';
 import 'biometric_widgets.dart';
 
@@ -538,13 +539,18 @@ class _NgxPortfolioAppState extends State<NgxPortfolioApp> with WidgetsBindingOb
 
     return MaterialApp(
       navigatorKey: navigatorKey,
-      builder: (context, child) => Stack(children: [
-        Offstage(offstage: biometricLocked || privacyCover, child: child),
-        if (privacyCover && !biometricLocked) Positioned.fill(child: ColoredBox(color: Theme.of(context).colorScheme.surface)),
-        if (biometricLocked) Positioned.fill(child: BiometricUnlockScreen(
-          onUnlock: _unlockBiometric, onPassword: _usePassword,
-        )),
-      ]),
+      builder: (context, child) => MobileUpdatePrompt(
+        navigatorKey: navigatorKey,
+        enabled: !kIsWeb && !loading && !biometricLocked && !privacyCover,
+        child: Stack(children: [
+          Offstage(offstage: biometricLocked || privacyCover, child: child),
+          if (privacyCover && !biometricLocked)
+            Positioned.fill(child: ColoredBox(color: Theme.of(context).colorScheme.surface)),
+          if (biometricLocked) Positioned.fill(child: BiometricUnlockScreen(
+            onUnlock: _unlockBiometric, onPassword: _usePassword,
+          )),
+        ]),
+      ),
       debugShowCheckedModeBanner: false,
       title: 'Stockfolio',
       themeMode: themeMode,
