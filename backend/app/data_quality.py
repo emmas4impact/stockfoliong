@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 
 from .analysis import MAX_AGE, latest_observations, score_observation, utc
-from .financials import StatementInput, has_valuation, statement_history, valuation_snapshot
+from .financials import StatementInput, has_valuation, sector_signals, statement_history, valuation_snapshot
 from .instrument_reference import COMPANY_SHARES, REFERENCE_DATE, REFERENCE_URL, instrument_class
 from .models import FinancialStatement, FundamentalObservation, Stock, StockAnalysis, StockPrice
 
@@ -25,6 +25,7 @@ def data_quality_report(db, now=None):
     now = utc(now or datetime.now(timezone.utc))
     stocks = list(db.scalars(select(Stock).order_by(Stock.symbol)))
     universe = latest_observations(db)
+    company_peers = [o for o in universe if instrument_class(o.stock_symbol) == "company_share"]
     latest = {row.stock_symbol: row for row in universe}
     obs = FundamentalObservation
     ranked = select(obs.id, func.row_number().over(
@@ -46,6 +47,9 @@ def data_quality_report(db, now=None):
     ).group_by(StockAnalysis.stock_symbol))}
 
     rows = []
+    excluded_scored = []
+    pe_changes = []
+    home_snapshots = {}
     issue_counts = Counter()
     sectors = defaultdict(lambda: {"listed": 0, "pe_scored": 0, "current_pe_pb": 0,
                                    "with_reviewed_statements": 0})
@@ -60,6 +64,20 @@ def data_quality_report(db, now=None):
         if result and result["freshness"] != "current":
             issues.add("pe_freshness_" + result["freshness"])
         scored = result is not None and result["scores"]["valuation"] is not None
+        kind = instrument_class(stock.symbol)
+        if scored:
+            if kind != "company_share":
+                excluded_scored.append({"symbol": stock.symbol, "instrument_class": kind})
+            else:
+                # Removing peers cannot make a previously ineligible target scoreable.
+                after = score_observation(observation, company_peers, now)
+                if result["peer_count"] != after["peer_count"]:
+                    pe_changes.append({
+                        "symbol": stock.symbol, "sector": observation.inputs.get("sector"),
+                        "before": result["scores"]["valuation"], "after": after["scores"]["valuation"],
+                        "peers_before": result["peer_count"], "peers_after": after["peer_count"],
+                        "median_before": result["sector_pe_median"], "median_after": after["sector_pe_median"],
+                    })
         if not scored:
             issues.add("pe_score_unavailable")
 
@@ -68,6 +86,8 @@ def data_quality_report(db, now=None):
         if valuation_row is not None:
             try:
                 snapshot = valuation_snapshot(valuation_row, now)
+                if utc(valuation_row.observed_at) >= now - MAX_AGE:
+                    home_snapshots[stock.symbol] = snapshot
             except (TypeError, ValueError, OverflowError):
                 issues.add("invalid_valuation_metadata")
         if snapshot is None:
@@ -129,7 +149,7 @@ def data_quality_report(db, now=None):
         counts["with_reviewed_statements"] += int(bool(valid_statements))
         issue_counts.update(issues)
         rows.append({
-            "symbol": stock.symbol, "sector": sector, "instrument_class": instrument_class(stock.symbol),
+            "symbol": stock.symbol, "sector": sector, "instrument_class": kind,
             "pe_scored": scored, "pe_score_reasons": result["reasons"] if result and not scored else [],
             "pe_freshness": result["freshness"] if result else None,
             "observed_at": utc(observation.observed_at).isoformat() if observation else None,
@@ -151,6 +171,18 @@ def data_quality_report(db, now=None):
         return {"count": count, "percent": round(100 * count / denominator, 1) if denominator else None}
     equities = [r for r in rows if r["instrument_class"] == "company_share"]
     unverified = [r["symbol"] for r in rows if r["instrument_class"] == "unverified"]
+    # Mirror the home screen's quote eligibility, but compare before its per-label display limit.
+    quoted = [s for s in stocks if s.last_price is not None and s.open_price is not None]
+    companies = [s for s in quoted if instrument_class(s.symbol) == "company_share"]
+    baseline = {r["symbol"]: r for r in sector_signals(quoted, home_snapshots)}
+    preview = {r["symbol"]: r for r in sector_signals(companies, home_snapshots)}
+    signal_changes = []
+    for stock in companies:
+        before = baseline.get(stock.symbol)
+        after = preview.get(stock.symbol)
+        if before and (not after or before["signal"] != after["signal"]):
+            signal_changes.append({"symbol": stock.symbol, "sector": before["sector"],
+                                   "before": before["signal"], "after": after["signal"] if after else None})
     return {
         "generated_at": now.isoformat(), "listed": total,
         "instrument_audit": {
@@ -165,6 +197,15 @@ def data_quality_report(db, now=None):
                 "pe_scored": coverage(sum(r["pe_scored"] for r in equities), len(equities)),
                 "current_positive_pe_pb": coverage(sum(r["current_positive_pe_pb"] for r in equities), len(equities)),
             },
+        },
+        "company_peer_preview": {
+            "scope": "Read-only comparison; verified company shares as both targets and peers. Signals before display limits. Null after means insufficient peers, not Hold.",
+            "excluded_scored_instruments": excluded_scored,
+            "company_pe_peer_changes": pe_changes,
+            "company_signal_changes": signal_changes,
+            "company_signals_before": sum(s.symbol in baseline for s in companies),
+            "company_signals_after": len(preview),
+            "excluded_signal_symbols": sorted(s for s in baseline if instrument_class(s) != "company_share"),
         },
         "coverage": {
             "pe_scored": coverage(sum(row["pe_scored"] for row in rows)),

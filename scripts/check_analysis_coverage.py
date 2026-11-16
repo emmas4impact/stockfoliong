@@ -78,7 +78,11 @@ def main():
     parser.add_argument("--sync", action="store_true", help="Request one stock sync first (admin only)")
     parser.add_argument("--data-quality", action="store_true",
                         help="Audit stored valuations, reporting dates and statements (admin only; read-only)")
+    parser.add_argument("--peer-preview", action="store_true",
+                        help="Show only the company-share peer comparison from the read-only admin audit")
     args = parser.parse_args()
+    if args.peer_preview and args.sync:
+        parser.error("--peer-preview is read-only and cannot be combined with --sync")
     base = args.api_base.rstrip("/")
     url = urlsplit(base)
     if not url.hostname or url.username or url.password or url.query or url.fragment or not (
@@ -107,9 +111,14 @@ def main():
         if (result["status"] != "success" or result["source"] not in {"ngxpulse", "ngx_doclib"}
                 or result["stocks_upserted"] < 1):
             raise RuntimeError("No live-provider sync confirmed; not reporting old data as a fresh run.")
-    if args.data_quality:
+    if args.data_quality or args.peer_preview:
         print("Auditing stored data without calling the market provider...", file=sys.stderr)
-        print(json.dumps(call("/admin/analysis/data-quality"), indent=2))
+        report = call("/admin/analysis/data-quality")
+        if args.peer_preview:
+            if "company_peer_preview" not in report:
+                sys.exit("The API does not yet include the company peer preview. Check the deployed API version.")
+            report = {"generated_at": report["generated_at"], **report["company_peer_preview"]}
+        print(json.dumps(report, indent=2))
         return
     print("Checking listed stocks sequentially...", file=sys.stderr)
     report = check_coverage(call)

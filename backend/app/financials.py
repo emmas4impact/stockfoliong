@@ -140,6 +140,10 @@ def home_valuations(db, stocks, limit):
     ).label("position")).where(has_valuation(), obs.observed_at >= now - MAX_AGE).subquery()
     rows = db.scalars(select(obs).join(ranked, ranked.c.id == obs.id).where(ranked.c.position == 1))
     snapshots = {row.stock_symbol: valuation_snapshot(row, now) for row in rows}
+    return snapshots, sector_signals(stocks, snapshots, limit)
+
+
+def sector_signals(stocks, snapshots, limit=None):
     sectors = {}
     for stock in stocks:
         value = snapshots.get(stock.symbol)
@@ -162,8 +166,8 @@ def home_valuations(db, stocks, limit):
                 pe=value.pe_ratio, pb=value.pb_ratio, peer_pe=pe, peer_pb=pb, peer_count=len(peers),
                 as_of=value.provider_updated_at)))
     ordered = sorted(signals, key=lambda pair: (pair[0], pair[1]["symbol"]))
-    return snapshots, [row for label in ("Buy", "Hold", "Sell")
-                       for row in [item for _, item in ordered if item["signal"] == label][:limit]]
+    return [row for label in ("Buy", "Hold", "Sell")
+            for row in [item for _, item in ordered if item["signal"] == label][:limit]]
 
 
 def get_financials(db, symbol):

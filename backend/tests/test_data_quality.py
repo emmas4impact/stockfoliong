@@ -116,6 +116,34 @@ class DataQualityTests(unittest.TestCase):
         self.assertEqual(row["pe_freshness"], "unknown")
         self.assertFalse(row["pe_scored"])
 
+    def test_peer_preview_separates_exclusions_from_lost_or_changed_company_labels(self):
+        for sector, values in [
+            ("property", {"JBERGER": 20, "UPDC": 100, "UHREIT": 1, "SFSREIT": 2, "UPDCREIT": 3}),
+            ("comparison", {"UBA": 10, "GTCO": 10, "FCMB": 10, "WEMABANK": 15,
+                            "UNMATCHED1": 100, "UNMATCHED2": 100, "UNMATCHED3": 100}),
+        ]:
+            for symbol, value in values.items():
+                self.db.add(Stock(symbol=symbol, sector=sector, open_price=1, last_price=1))
+                self.observation(symbol, inputs={"sector": sector, "pe_ratio": value, "fundamentals": {
+                    "pe_ratio": value, "pb_ratio": value, "updated_at": self.now.isoformat()}})
+        # A current ratio without an opening quote participates in P/E scoring, not home signals.
+        self.db.add(Stock(symbol="NREIT", sector="property", last_price=1))
+        self.observation("NREIT", inputs={"sector": "property", "pe_ratio": 5, "fundamentals": {
+            "pe_ratio": 5, "pb_ratio": 5, "updated_at": self.now.isoformat()}})
+        self.db.commit()
+        preview = data_quality_report(self.db, self.now)["company_peer_preview"]
+        scores = {r["symbol"]: r for r in preview["company_pe_peer_changes"]}
+        self.assertEqual(scores["UPDC"]["before"], 0)
+        self.assertIsNone(scores["UPDC"]["after"])
+        self.assertEqual(scores["UPDC"]["peers_after"], 1)
+        signals = {r["symbol"]: (r["before"], r["after"]) for r in preview["company_signal_changes"]}
+        self.assertEqual(signals["UPDC"], ("Sell", None))
+        self.assertEqual(signals["WEMABANK"], ("Buy", "Sell"))
+        self.assertEqual(preview["company_signals_before"], 6)
+        self.assertEqual(preview["company_signals_after"], 4)
+        self.assertIn({"symbol": "NREIT", "instrument_class": "fund_or_trust"}, preview["excluded_scored_instruments"])
+        self.assertNotIn("NREIT", preview["excluded_signal_symbols"])
+
     def test_stale_unknown_invalid_and_future_metadata(self):
         cases = {
             "STALE": {"fundamentals_received_at": (self.now - timedelta(days=8)).isoformat(),
