@@ -1707,6 +1707,7 @@ class MarketIdeasBundle {
     required this.stocksAnalyzed,
     this.generatedAt,
     this.signals = const [],
+    this.insufficientPeers = const [],
   });
 
   final String disclaimer;
@@ -1714,10 +1715,13 @@ class MarketIdeasBundle {
   final int stocksAnalyzed;
   final DateTime? generatedAt;
   final List<ValuationSignal> signals;
+  final List<PeerShortfall> insufficientPeers;
 
   factory MarketIdeasBundle.fromJson(Map<String, dynamic> json) {
     final ideasJson = json['ideas'] as List<dynamic>? ?? const [];
     return MarketIdeasBundle(
+      insufficientPeers: (json['insufficient_peers'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>().map(PeerShortfall.fromJson).toList(),
       signals: (json['valuation_signals'] as List? ?? const [])
           .whereType<Map<String, dynamic>>().map(ValuationSignal.fromJson).toList(),
       disclaimer: json['disclaimer']?.toString() ?? '',
@@ -1730,6 +1734,14 @@ class MarketIdeasBundle {
           : DateTime.tryParse(json['generated_at'] as String),
     );
   }
+}
+
+class PeerShortfall {
+  PeerShortfall.fromJson(Map<String, dynamic> row)
+      : symbol = row['symbol'] as String, sector = row['sector'] as String,
+        peers = row['peer_count'] as int, requiredPeers = row['required_peers'] as int;
+  final String symbol, sector;
+  final int peers, requiredPeers;
 }
 
 class ValuationSignal {
@@ -7330,7 +7342,7 @@ class MarketIdeasPanel extends StatelessWidget {
   final String? emptyMessage;
   @override
   Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-    _ValuationSignals(signals: bundle.signals, onSelect: onSelect),
+    _ValuationSignals(signals: bundle.signals, insufficient: bundle.insufficientPeers, onSelect: onSelect),
     const SizedBox(height: 16),
     Text('Market ideas', style: Theme.of(context).textTheme.titleLarge),
     Text('${bundle.stocksAnalyzed} stocks analysed', style: Theme.of(context).textTheme.bodySmall),

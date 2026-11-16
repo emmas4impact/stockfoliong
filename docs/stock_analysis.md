@@ -43,7 +43,20 @@ These records provide prospective evidence from deployment onward, not a
 retrospective track record. They are research datasets; do not expose any user
 portfolio or personal information.
 
-## Model `sector-pe-v1`
+## Live peer universe
+
+`sector-pe-v3` and the home P/E + P/B signals compare verified company shares
+only, using the dated NGX list in `instrument_reference.py`. Funds, trusts and
+unmatched symbols remain in holdings and quote views but do not receive company
+scores or enter sector medians. A newly listed company needs a reference update.
+Older archived model results are retained under their original versions.
+
+The home response lists otherwise eligible companies with fewer than three other
+qualifying sector peers in `insufficient_peers`, separate from Buy/Hold/Sell.
+Missing or stale inputs do not qualify for this list. The admin `--peer-preview`
+compares the legacy mixed baseline (before) to the live company model (after).
+
+## Original model `sector-pe-v1`
 
 - Same normalized sector and provider; exclude the target stock.
 - Only positive finite P/E values and observations received within seven days.

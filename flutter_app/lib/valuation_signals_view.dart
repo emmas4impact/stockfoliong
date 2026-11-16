@@ -30,8 +30,9 @@ enum _SignalStyle {
 }
 
 class _ValuationSignals extends StatefulWidget {
-  const _ValuationSignals({required this.signals, this.onSelect});
+  const _ValuationSignals({required this.signals, required this.insufficient, this.onSelect});
   final List<ValuationSignal> signals;
+  final List<PeerShortfall> insufficient;
   final ValueChanged<Stock>? onSelect;
   @override
   State<_ValuationSignals> createState() => _ValuationSignalsState();
@@ -74,7 +75,8 @@ class _ValuationSignalsState extends State<_ValuationSignals> {
                       content: const Text(
                         'Buy: both P/E and P/B are at least 20% below sector peer medians. '
                         'Sell: both are at least 20% above. Hold: neither condition. '
-                        'Only current positive ratios with at least three comparable peers qualify. Research only.',
+                        'Only verified company shares with current positive ratios and at least three other '
+                        'qualifying company shares in their sector receive a signal. Research only.',
                       ),
                       actions: [
                         TextButton(
@@ -305,6 +307,21 @@ class _ValuationSignalsState extends State<_ValuationSignals> {
                 );
               },
             ),
+            if (widget.insufficient.isNotEmpty)
+              ExpansionTile(
+                tilePadding: EdgeInsets.zero,
+                title: Text('Insufficient peers (${widget.insufficient.length})'),
+                children: [
+                  for (final item in widget.insufficient)
+                    ListTile(
+                      leading: CompanyLogo(symbol: item.symbol, size: 36, useInitials: true, showFullMark: true),
+                      title: Text(item.symbol),
+                      subtitle: Text('${item.sector} · ${item.peers} of ${item.requiredPeers} required peers'),
+                      onTap: widget.onSelect == null ? null : () =>
+                          widget.onSelect!(Stock(symbol: item.symbol, sector: item.sector)),
+                    ),
+                ],
+              ),
           ],
         ),
       ),

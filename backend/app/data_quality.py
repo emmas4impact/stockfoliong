@@ -25,7 +25,6 @@ def data_quality_report(db, now=None):
     now = utc(now or datetime.now(timezone.utc))
     stocks = list(db.scalars(select(Stock).order_by(Stock.symbol)))
     universe = latest_observations(db)
-    company_peers = [o for o in universe if instrument_class(o.stock_symbol) == "company_share"]
     latest = {row.stock_symbol: row for row in universe}
     obs = FundamentalObservation
     ranked = select(obs.id, func.row_number().over(
@@ -65,19 +64,17 @@ def data_quality_report(db, now=None):
             issues.add("pe_freshness_" + result["freshness"])
         scored = result is not None and result["scores"]["valuation"] is not None
         kind = instrument_class(stock.symbol)
-        if scored:
+        previous = score_observation(observation, universe, now, legacy_mixed=True) if observation else None
+        if previous and previous["scores"]["valuation"] is not None:
             if kind != "company_share":
                 excluded_scored.append({"symbol": stock.symbol, "instrument_class": kind})
-            else:
-                # Removing peers cannot make a previously ineligible target scoreable.
-                after = score_observation(observation, company_peers, now)
-                if result["peer_count"] != after["peer_count"]:
-                    pe_changes.append({
-                        "symbol": stock.symbol, "sector": observation.inputs.get("sector"),
-                        "before": result["scores"]["valuation"], "after": after["scores"]["valuation"],
-                        "peers_before": result["peer_count"], "peers_after": after["peer_count"],
-                        "median_before": result["sector_pe_median"], "median_after": after["sector_pe_median"],
-                    })
+            elif previous["peer_count"] != result["peer_count"]:
+                pe_changes.append({
+                    "symbol": stock.symbol, "sector": observation.inputs.get("sector"),
+                    "before": previous["scores"]["valuation"], "after": result["scores"]["valuation"],
+                    "peers_before": previous["peer_count"], "peers_after": result["peer_count"],
+                    "median_before": previous["sector_pe_median"], "median_after": result["sector_pe_median"],
+                })
         if not scored:
             issues.add("pe_score_unavailable")
 
@@ -174,8 +171,10 @@ def data_quality_report(db, now=None):
     # Mirror the home screen's quote eligibility, but compare before its per-label display limit.
     quoted = [s for s in stocks if s.last_price is not None and s.open_price is not None]
     companies = [s for s in quoted if instrument_class(s.symbol) == "company_share"]
-    baseline = {r["symbol"]: r for r in sector_signals(quoted, home_snapshots)}
-    preview = {r["symbol"]: r for r in sector_signals(companies, home_snapshots)}
+    old_signals, _ = sector_signals(quoted, home_snapshots, legacy_mixed=True)
+    live_signals, _ = sector_signals(quoted, home_snapshots)
+    baseline = {r["symbol"]: r for r in old_signals}
+    preview = {r["symbol"]: r for r in live_signals}
     signal_changes = []
     for stock in companies:
         before = baseline.get(stock.symbol)
@@ -199,7 +198,7 @@ def data_quality_report(db, now=None):
             },
         },
         "company_peer_preview": {
-            "scope": "Read-only comparison; verified company shares as both targets and peers. Signals before display limits. Null after means insufficient peers, not Hold.",
+            "scope": "Before: legacy mixed instruments. After: live verified company shares. Signals before display limits. Null after means insufficient peers, not Hold.",
             "excluded_scored_instruments": excluded_scored,
             "company_pe_peer_changes": pe_changes,
             "company_signal_changes": signal_changes,
@@ -218,7 +217,7 @@ def data_quality_report(db, now=None):
         "by_sector": dict(sorted(sectors.items())), "stocks": rows,
         "limitations": [
             "Top-level coverage uses every stored stock record. Instrument audit coverage uses only stored company shares matched to the dated reference.",
-            "Unmatched symbols need review, not automatic exclusion or delisting. Instrument classifications do not change scores or peers.",
+            "Funds and unmatched symbols are not eligible for company-share scores or peer pools. Unmatched does not mean delisted.",
             "Provider update and receipt dates do not establish earnings publication dates.",
             "Statement validation checks structure and comparability, not independent accounting accuracy.",
             "Available Y/Y pairs may be historical; their latest reporting date is shown separately.",

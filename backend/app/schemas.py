@@ -275,12 +275,20 @@ class ValuationSignalOut(BaseModel):
     as_of: datetime
 
 
+class InsufficientPeersOut(BaseModel):
+    symbol: str
+    sector: str
+    peer_count: int
+    required_peers: int
+
+
 class MarketIdeasOut(BaseModel):
     disclaimer: str
     generated_at: datetime | None = None
     stocks_analyzed: int = 0
     ideas: list[MarketIdeaOut]
     valuation_signals: list[ValuationSignalOut] = Field(default_factory=list)
+    insufficient_peers: list[InsufficientPeersOut] = Field(default_factory=list)
 
 
 class PushStatusOut(BaseModel):

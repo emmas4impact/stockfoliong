@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, HttpUrl, model_v
 from sqlalchemy import func, select
 
 from .analysis import MAX_AGE, MIN_PEERS, data_freshness, finite_number, parse_timestamp, utc
+from .instrument_reference import instrument_class
 from .models import FinancialStatement, FundamentalObservation
 
 
@@ -140,20 +141,27 @@ def home_valuations(db, stocks, limit):
     ).label("position")).where(has_valuation(), obs.observed_at >= now - MAX_AGE).subquery()
     rows = db.scalars(select(obs).join(ranked, ranked.c.id == obs.id).where(ranked.c.position == 1))
     snapshots = {row.stock_symbol: valuation_snapshot(row, now) for row in rows}
-    return snapshots, sector_signals(stocks, snapshots, limit)
+    signals, insufficient = sector_signals(stocks, snapshots, limit)
+    return snapshots, signals, insufficient
 
 
-def sector_signals(stocks, snapshots, limit=None):
+def sector_signals(stocks, snapshots, limit=None, *, legacy_mixed=False):
     sectors = {}
     for stock in stocks:
+        if not legacy_mixed and instrument_class(stock.symbol) != "company_share":
+            continue
         value = snapshots.get(stock.symbol)
         sector = (stock.sector or "").strip().casefold()
         if (sector not in {"", "unknown", "other", "n/a", "unclassified"} and value
                 and value.freshness == "current" and (value.pe_ratio or 0) > 0 and (value.pb_ratio or 0) > 0):
             sectors.setdefault(sector, []).append((stock, value))
     signals = []
+    insufficient = []
     for group in sectors.values():
         if len(group) <= MIN_PEERS:
+            for stock, _ in group:
+                insufficient.append(dict(symbol=stock.symbol, sector=stock.sector.strip(),
+                                         peer_count=len(group)-1, required_peers=MIN_PEERS))
             continue
         for stock, value in group:
             peers = [v for s, v in group if s.symbol != stock.symbol]
@@ -166,8 +174,9 @@ def sector_signals(stocks, snapshots, limit=None):
                 pe=value.pe_ratio, pb=value.pb_ratio, peer_pe=pe, peer_pb=pb, peer_count=len(peers),
                 as_of=value.provider_updated_at)))
     ordered = sorted(signals, key=lambda pair: (pair[0], pair[1]["symbol"]))
-    return [row for label in ("Buy", "Hold", "Sell")
-            for row in [item for _, item in ordered if item["signal"] == label][:limit]]
+    return ([row for label in ("Buy", "Hold", "Sell")
+             for row in [item for _, item in ordered if item["signal"] == label][:limit]],
+            sorted(insufficient, key=lambda row: row["symbol"]))
 
 
 def get_financials(db, symbol):

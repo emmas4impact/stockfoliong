@@ -60,30 +60,30 @@ class DataQualityTests(unittest.TestCase):
         self.db.commit()
         report = data_quality_report(self.db, self.now)
         audit = report["instrument_audit"]
-        self.assertEqual(report["coverage"]["pe_scored"], {"count": 4, "percent": 80.0})
+        self.assertEqual(report["coverage"]["pe_scored"], {"count": 0, "percent": 0.0})
         self.assertEqual(audit["stored_company_shares"], 2)
         self.assertEqual(audit["stored_funds_or_trusts"], 2)
         self.assertEqual(audit["unverified_symbols"], ["FG123UNKNOWN"])
-        self.assertEqual(audit["stored_company_share_coverage"]["pe_scored"], {"count": 1, "percent": 50.0})
+        self.assertEqual(audit["stored_company_share_coverage"]["pe_scored"], {"count": 0, "percent": 0.0})
         self.assertNotIn("TIP", audit["reference_company_shares_not_in_db"])
         self.assertIn("UBA", audit["reference_company_shares_not_in_db"])
 
     def test_full_universe_coverage_and_no_writes(self):
-        for symbol in ["A", "B", "C", "D", "EMPTY"]:
+        for symbol in ["ACCESSCORP", "GTCO", "FCMB", "UBA", "EMPTY"]:
             self.db.add(Stock(symbol=symbol, sector="Banks"))
-        for symbol in ["A", "B", "C", "D"]:
+        for symbol in ["ACCESSCORP", "GTCO", "FCMB", "UBA"]:
             row = self.observation(symbol)
-            if symbol == "A":
+            if symbol == "ACCESSCORP":
                 # The highest P/E earns a valid zero score, not a missing score.
                 row.inputs = {"sector": "banks", "pe_ratio": 20,
                               "fundamentals": {"pe_ratio": 20, "pb_ratio": 1, "updated_at": self.now.isoformat()}}
-        old = self.observation("A", observation_key="older-fundamentals",
+        old = self.observation("ACCESSCORP", observation_key="older-fundamentals",
             observed_at=self.now - timedelta(days=1), inputs={"fundamentals": {
                 "pe_ratio": 20, "pb_ratio": 1, "updated_at": self.now.isoformat()}})
-        self.db.add_all([self.statement("A", self.now.year - 2), self.statement("A", self.now.year - 1),
-            StockPrice(stock_symbol="A", trade_date=date.today(), close_price=10)])
+        self.db.add_all([self.statement("ACCESSCORP", self.now.year - 2), self.statement("ACCESSCORP", self.now.year - 1),
+            StockPrice(stock_symbol="ACCESSCORP", trade_date=date.today(), close_price=10)])
         self.db.flush()
-        self.db.add(StockAnalysis(stock_symbol="A", observation_id=old.id, analysis_key="saved",
+        self.db.add(StockAnalysis(stock_symbol="ACCESSCORP", observation_id=old.id, analysis_key="saved",
                                  model_version="sector-pe-v1", generated_at=self.now, result={}))
         self.db.commit()
         queries = []

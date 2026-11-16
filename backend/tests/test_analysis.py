@@ -34,16 +34,16 @@ class AnalysisTests(unittest.TestCase):
                                     "fundamentals": {"pe_ratio": pe, "updated_at": self.now.isoformat()}},
                            self.now - timedelta(days=age))
 
-    def result(self, symbol="ABC"):
+    def result(self, symbol="ACCESSCORP"):
         rows = latest_observations(self.db)
         return score_observation(next(row for row in rows if row.stock_symbol == symbol), rows, self.now)
 
     def test_comparison_excludes_wrong_sector_source_and_stale_peers(self):
-        for symbol, pe in [("ABC", 10), ("B", 5), ("C", 10), ("D", 20)]:
+        for symbol, pe in [("ACCESSCORP", 10), ("GTCO", 5), ("FCMB", 10), ("UBA", 20)]:
             self.add(symbol, pe)
-        self.add("OTHER", 100, sector="energy")
-        self.add("STALE", 100, age=8)
-        self.add("SOURCE", 100, source="ngx_doclib")
+        self.add("OANDO", 100, sector="energy")
+        self.add("WEMABANK", 100, age=8)
+        self.add("JAIZBANK", 100, source="ngx_doclib")
         result = self.result()
         self.assertEqual(result["peer_count"], 3)
         self.assertEqual(result["sector_pe_median"], 10)
@@ -51,46 +51,57 @@ class AnalysisTests(unittest.TestCase):
         self.assertIsNone(result["scores"]["overall"])
 
     def test_missing_negative_and_stale_target_are_not_scored(self):
-        for symbol in ["B", "C", "D"]:
+        for symbol in ["GTCO", "FCMB", "UBA"]:
             self.add(symbol, 10)
-        for symbol, pe, age in [("MISSING", None, 0), ("NEGATIVE", -5, 0), ("OLD", 5, 8)]:
+        for symbol, pe, age in [("STERLINGNG", None, 0), ("FIDELITYBK", -5, 0), ("STANBIC", 5, 8)]:
             self.add(symbol, pe, age=age)
             self.assertIsNone(self.result(symbol)["scores"]["valuation"])
 
     def test_small_peer_group_withholds_score(self):
-        self.add("ABC", 5)
-        self.add("B", 10)
+        self.add("ACCESSCORP", 5)
+        self.add("GTCO", 10)
         self.assertIsNone(self.result()["scores"]["valuation"])
 
+    def test_company_only_model_never_uses_funds_or_unmatched_peers(self):
+        for symbol in ["UPDC", "JBERGER", "UHREIT", "UPDCREIT", "UNMATCHED"]:
+            self.add(symbol, 10, sector="property")
+        result = self.result("UPDC")
+        self.assertEqual([r["symbol"] for r in result["peer_inputs"]], ["JBERGER"])
+        self.assertIsNone(result["scores"]["valuation"])
+        self.assertTrue(any("Insufficient peers" in reason for reason in result["reasons"]))
+        for symbol in ("UHREIT", "UNMATCHED"):
+            self.assertEqual(self.result(symbol)["peer_count"], 0)
+            self.assertIsNone(self.result(symbol)["scores"]["valuation"])
+
     def test_observations_preserve_missing_data_and_daily_history(self):
-        self.add("ABC", 5)
-        self.add("ABC", 5)
+        self.add("ACCESSCORP", 5)
+        self.add("ACCESSCORP", 5)
         self.assertEqual(self.db.scalar(select(func.count()).select_from(FundamentalObservation)), 1)
-        self.add("ABC", None)
+        self.add("ACCESSCORP", None)
         self.assertIsNone(latest_observations(self.db)[0].inputs["pe_ratio"])
-        self.add("ABC", 5)
+        self.add("ACCESSCORP", 5)
         self.assertEqual(latest_observations(self.db)[0].inputs["pe_ratio"], 5)
         self.now += timedelta(days=1)
-        self.add("ABC", 5)
+        self.add("ACCESSCORP", 5)
         self.assertEqual(self.db.scalar(select(func.count()).select_from(FundamentalObservation)), 4)
 
     def test_analysis_archive_is_reproducible_and_idempotent(self):
-        for symbol, pe in [("ABC", 5), ("B", 10), ("C", 15), ("D", 20)]:
+        for symbol, pe in [("ACCESSCORP", 5), ("GTCO", 10), ("FCMB", 15), ("UBA", 20)]:
             self.add(symbol, pe)
         archive_sync_analysis(self.db)
         self.db.commit()
         archive_sync_analysis(self.db)
         self.assertEqual(self.db.scalar(select(func.count()).select_from(StockAnalysis)), 4)
-        saved = self.db.scalar(select(StockAnalysis).where(StockAnalysis.stock_symbol == "ABC"))
+        saved = self.db.scalar(select(StockAnalysis).where(StockAnalysis.stock_symbol == "ACCESSCORP"))
         self.assertEqual(saved.result["scores"]["valuation"], 100)
         self.assertEqual(len(saved.result["peer_inputs"]), 3)
         self.assertEqual(saved.model_version, MODEL_VERSION)
 
     def test_old_provider_data_cannot_be_refreshed_by_receiving_it_again(self):
-        for symbol in ["ABC", "B", "C", "D", "E"]:
+        for symbol in ["ACCESSCORP", "GTCO", "FCMB", "UBA", "ZENITHBANK"]:
             self.add(symbol, 10)
         rows = latest_observations(self.db)
-        target = next(row for row in rows if row.stock_symbol == "ABC")
+        target = next(row for row in rows if row.stock_symbol == "ACCESSCORP")
         for updated, expected in [((self.now - timedelta(days=8)).isoformat(), "stale"),
                                   ((self.now + timedelta(seconds=1)).isoformat(), "stale"),
                                   (None, "unknown"), ("invalid", "unknown")]:
@@ -98,16 +109,16 @@ class AnalysisTests(unittest.TestCase):
             result = score_observation(target, rows, self.now)
             self.assertEqual(result["freshness"], expected)
             self.assertIsNone(result["scores"]["valuation"])
-            other = next(row for row in rows if row.stock_symbol == "B")
+            other = next(row for row in rows if row.stock_symbol == "GTCO")
             peer_result = score_observation(other, rows, self.now)
             self.assertEqual(peer_result["peer_count"], 3)
-            self.assertNotIn("ABC", [p["symbol"] for p in peer_result["peer_inputs"]])
+            self.assertNotIn("ACCESSCORP", [p["symbol"] for p in peer_result["peer_inputs"]])
 
     def test_receipt_age_boundary_and_unverifiable_stock_list_pe(self):
-        for symbol in ["ABC", "B", "C", "D"]:
+        for symbol in ["ACCESSCORP", "GTCO", "FCMB", "UBA"]:
             self.add(symbol, 10)
         rows = latest_observations(self.db)
-        target = next(row for row in rows if row.stock_symbol == "ABC")
+        target = next(row for row in rows if row.stock_symbol == "ACCESSCORP")
         original = target.inputs
         for receipt, expected in [((self.now - timedelta(days=7)).isoformat(), "current"),
                                    ((self.now - timedelta(days=7, seconds=1)).isoformat(), "stale"),
@@ -122,7 +133,7 @@ class AnalysisTests(unittest.TestCase):
             self.assertIsNone(score_observation(target, rows, self.now)["scores"]["valuation"])
 
     def test_old_archive_remains_unchanged_when_v2_is_saved(self):
-        for symbol in ["ABC", "B", "C", "D"]:
+        for symbol in ["ACCESSCORP", "GTCO", "FCMB", "UBA"]:
             self.add(symbol, 10)
         target = latest_observations(self.db)[0]
         old = StockAnalysis(analysis_key="v1-archive", stock_symbol=target.stock_symbol,

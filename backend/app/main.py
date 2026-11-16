@@ -327,7 +327,7 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
             turnover_values.append(tr)
     sorted_turnovers = sorted(turnover_values)
 
-    valuations, signals = home_valuations(db, stocks, limit)
+    valuations, signals, insufficient = home_valuations(db, stocks, limit)
     candidates: list[dict] = []
     for stock in stocks:
         current_price = float(stock.last_price) if stock.last_price is not None else None
@@ -472,6 +472,7 @@ def market_ideas_payload(db: Session, limit: int) -> dict:
         "stocks_analyzed": len(stocks),
         "ideas": enriched[:limit],
         "valuation_signals": signals,
+        "insufficient_peers": insufficient,
     }
 
 

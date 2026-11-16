@@ -4,6 +4,28 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   for (final width in [360.0, 1100.0]) {
+    testWidgets('short peer group is separate from Hold at $width', (tester) async {
+      await tester.binding.setSurfaceSize(Size(width, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final bundle = MarketIdeasBundle.fromJson({
+        'insufficient_peers': [
+          {'symbol': 'UPDC', 'sector': 'Property', 'peer_count': 1, 'required_peers': 3},
+        ],
+      });
+      String? selected;
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: SingleChildScrollView(
+        child: MarketIdeasPanel(bundle: bundle, onSelect: (stock) => selected = stock.symbol),
+      ))));
+      await tester.tap(find.text('Hold'));
+      await tester.pumpAndSettle();
+      expect(find.text('UPDC'), findsNothing);
+      await tester.tap(find.text('Insufficient peers (1)'));
+      await tester.pumpAndSettle();
+      expect(find.text('Property · 1 of 3 required peers'), findsOneWidget);
+      await tester.tap(find.text('UPDC'));
+      expect(selected, 'UPDC');
+      expect(tester.takeException(), isNull);
+    });
     testWidgets('Home valuation layout and signals at $width', (tester) async {
       await tester.binding.setSurfaceSize(Size(width, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));

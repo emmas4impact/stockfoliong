@@ -1,4 +1,4 @@
-"""Dated NGX reference for the coverage audit only; never used to select peers."""
+"""Dated NGX equity universe for valuation comparisons and coverage reporting."""
 
 REFERENCE_DATE = "2026-11-13"
 REFERENCE_URL = (

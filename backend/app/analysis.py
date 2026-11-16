@@ -10,8 +10,9 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
 from .models import FundamentalObservation, StockAnalysis
+from .instrument_reference import instrument_class
 
-MODEL_VERSION = "sector-pe-v2"
+MODEL_VERSION = "sector-pe-v3"
 MAX_AGE = timedelta(days=7)
 MIN_PEERS = 3
 DISCLAIMER = "Research information only, not financial advice. Contact your broker for detailed analysis."
@@ -115,16 +116,18 @@ def latest_observations(db):
     ).where(ranked.c.position == 1)))
 
 
-def score_observation(target, universe, now=None):
+def score_observation(target, universe, now=None, *, legacy_mixed=False):
     now = now or datetime.now(timezone.utc)
     inputs = target.inputs
     pe = finite_number(inputs.get("pe_ratio"))
     sector = inputs.get("sector")
     freshness = pe_freshness(target, now)
     fresh = freshness == "current"
+    eligible_target = legacy_mixed or instrument_class(target.stock_symbol) == "company_share"
     peers = [row for row in universe if (
-        row.stock_symbol != target.stock_symbol and sector
+        eligible_target and row.stock_symbol != target.stock_symbol and sector
         and row.inputs.get("sector") == sector and row.source == target.source
+        and (legacy_mixed or instrument_class(row.stock_symbol) == "company_share")
         and pe_freshness(row, now) == "current"
         and (finite_number(row.inputs.get("pe_ratio")) or 0) > 0
     )]
@@ -140,13 +143,15 @@ def score_observation(target, universe, now=None):
         reasons.append("A positive P/E is unavailable; zero or negative P/E is not scored as cheap.")
     if not sector:
         reasons.append("Sector classification is unavailable.")
-    if len(peers) < MIN_PEERS:
-        reasons.append("At least three positive-P/E sector peers from the same source with confirmed current fundamentals are required.")
+    if not eligible_target:
+        reasons.append("Not scored: this comparison is for verified company shares only.")
+    elif len(peers) < MIN_PEERS:
+        reasons.append("Insufficient peers: at least three same-sector peers from the same source with confirmed current positive P/E are required.")
     if fresh and pe is not None and pe > 0 and sector_pe is not None:
         score = round(100 * sum(1 if other > pe else 0.5 if other == pe else 0 for other in values) / len(values), 2)
         reasons.append("Valuation is the percentile of sector peers with a higher P/E, with half weight for ties.")
     return {
-        "symbol": target.stock_symbol, "model_version": MODEL_VERSION,
+        "symbol": target.stock_symbol, "model_version": "sector-pe-v2" if legacy_mixed else MODEL_VERSION,
         "observed_at": utc(target.observed_at).isoformat(), "source": target.source,
         "inputs": inputs, "stale": not fresh, "freshness": freshness,
         "scores": {"valuation": score, "growth": None, "dividend": None,

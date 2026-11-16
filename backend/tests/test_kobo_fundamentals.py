@@ -23,8 +23,8 @@ class KoboSyncTests(unittest.TestCase):
         self.addCleanup(engine.dispose)
         self.addCleanup(self.db.close)
         quotes = [{"symbol": s, "sector": "Financial Services", "source": "ngxpulse",
-                   "pe_ratio": 8 if s == "UNMATCHED" else None, "last_price": 119.84}
-                  for s in ["GTCO", "BANK1", "BANK2", "BANK3", "UNMATCHED", "FORWARD"]]
+                   "pe_ratio": 8 if s == "ACCESSCORP" else None, "last_price": 119.84}
+                  for s in ["GTCO", "UBA", "FCMB", "WEMABANK", "ACCESSCORP", "FORWARD"]]
         def mock(target, **kwargs):
             p = patch(target, **kwargs)
             self.addCleanup(p.stop)
@@ -43,9 +43,9 @@ class KoboSyncTests(unittest.TestCase):
                  "pb_ratio": 1.26, "updated_at": now,
                  "extra": {"book_value_per_share": 94.45}},
                 {"symbol": "FORWARD", "forward_pe": 3.1, "pe_ratio": None},
-                {"symbol": "BANK3", "pe_ratio": -2}, {"symbol": "BANK2", "pe_ratio": 7, "updated_at": now},
-                {"symbol": "BANK1", "pe_ratio": 6, "updated_at": now},
-                {"symbol": "UNMATCHED", "pe_ratio": 8, "updated_at": now}]
+                {"symbol": "WEMABANK", "pe_ratio": -2}, {"symbol": "FCMB", "pe_ratio": 7, "updated_at": now},
+                {"symbol": "UBA", "pe_ratio": 6, "updated_at": now},
+                {"symbol": "ACCESSCORP", "pe_ratio": 8, "updated_at": now}]
         self.get.return_value.json.return_value = {"success": True, "count": len(rows), "fundamentals": rows}
         result = services.sync_stocks(self.db)
         self.assertIn("6/6", result[-1])
@@ -60,8 +60,8 @@ class KoboSyncTests(unittest.TestCase):
         self.assertEqual(gtco["inputs"]["fundamentals"]["updated_at"], rows[0]["updated_at"])
         self.assertEqual(gtco["scores"]["valuation"], 100)
         self.assertIsNone(results["FORWARD"]["inputs"]["pe_ratio"])
-        self.assertIsNone(results["BANK3"]["scores"]["valuation"])
-        self.assertEqual(results["UNMATCHED"]["inputs"]["pe_ratio"], 8)
+        self.assertIsNone(results["WEMABANK"]["scores"]["valuation"])
+        self.assertEqual(results["ACCESSCORP"]["inputs"]["pe_ratio"], 8)
 
     def test_denied_fundamentals_does_not_abort_stock_sync(self):
         self.get.return_value.status_code = 403
@@ -81,13 +81,13 @@ class KoboSyncTests(unittest.TestCase):
         now = datetime.now(timezone.utc)
         self.get.return_value.json.return_value = {"success": True, "fundamentals": [
             {"symbol": "GTCO", "pe_ratio": 5, "pb_ratio": 1, "updated_at": now.isoformat()},
-            {"symbol": "BANK1", "pe_ratio": 8, "pb_ratio": 1,
+            {"symbol": "UBA", "pe_ratio": 8, "pb_ratio": 1,
              "updated_at": (now - timedelta(days=8)).isoformat()},
         ]}
         first = services.sync_stocks(self.db)
         self.assertIn("1 current, 1 stale, 0 unknown", first[-1])
         self.assertIn("refresh interval 1h", first[-1])
-        original = get_financials(self.db, "BANK1").valuation
+        original = get_financials(self.db, "UBA").valuation
         self.assertEqual(original.freshness, "stale")
         services.sync_stocks(self.db)
         self.assertEqual(self.get.call_count, 1)
@@ -99,7 +99,7 @@ class KoboSyncTests(unittest.TestCase):
         self.assertIn("429", services.sync_stocks(self.db)[-1])
         self.assertIn("backoff", services.sync_stocks(self.db)[-1])
         self.assertEqual(self.get.call_count, 2)
-        self.assertEqual(get_financials(self.db, "BANK1").valuation, original)
+        self.assertEqual(get_financials(self.db, "UBA").valuation, original)
 
     def test_complete_batch_keeps_daily_cache_and_original_receipt(self):
         now = datetime.now(timezone.utc)
@@ -142,7 +142,7 @@ class KoboSyncTests(unittest.TestCase):
         self.assertIn("backoff", services.sync_stocks(self.db)[-1])
         with Session(self.db.get_bind()) as reader:
             self.assertEqual(get_financials(reader, "GTCO").valuation, original)
-            self.assertIsNone(get_financials(reader, "UNMATCHED").valuation)
+            self.assertIsNone(get_financials(reader, "ACCESSCORP").valuation)
         self.assertEqual(self.get.call_count, 2)
         services.cache_api_payload(self.db, cache_key=services.FUNDAMENTALS_RETRY_KEY,
                                    payload={"retry_after": (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()})
