@@ -1,3 +1,9 @@
-const appVersionName = '1.0.10';
-const appBuildNumber = '11';
-const appDisplayVersion = '1.0.10+11';
+const appVersionName = String.fromEnvironment(
+  'APP_VERSION_NAME',
+  defaultValue: '1.13',
+);
+const appBuildNumber = String.fromEnvironment(
+  'APP_BUILD_NUMBER',
+  defaultValue: '1',
+);
+const appDisplayVersion = appVersionName;

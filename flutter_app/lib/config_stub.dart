@@ -1,6 +1,6 @@
 const _buildTimeApiBaseUrl = String.fromEnvironment(
   'API_BASE_URL',
-  defaultValue: 'http://localhost:8000',
+  defaultValue: 'https://ngx-api.up.railway.app',
 );
 
 String configuredApiBaseUrl() => _buildTimeApiBaseUrl;

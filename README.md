@@ -1,4 +1,4 @@
-# NGX Portfolio Dashboard
+# Stockfolio Dashboard
 
 This repo now contains two paths:
 
@@ -102,6 +102,15 @@ Use `include_history=true` when you want to backfill chart data. That is slower 
 
 ## Flutter App
 
+Stock detail on web, Android, and iOS shows recent NGX filings with links to
+the original PDFs. Set `NGXPULSE_API_KEY` on the API server for the 
+disclosures feed; do not include the key in Flutter builds. "View all" shows
+that company's filings in the provider's latest bulk feed, not a lifetime archive.
+
+The home and landing screens display current IPOs, public offers and rights
+issues from NGX Invest snapshot. The panel is hidden for empty or stale
+snapshots. Offer dates come from the offer feed, never from filing timestamps.
+
 Run the app in a separate terminal:
 
 ```bash
@@ -120,6 +129,18 @@ For iOS simulator on the same machine:
 ```bash
 flutter run -d ios --dart-define=API_BASE_URL=http://localhost:8000
 ```
+
+For a production-style native release run, the Android/iOS app now defaults to
+the Railway API URL used in the mobile setup docs, so you can run:
+
+```bash
+cd flutter_app
+flutter run -d android --release
+flutter run -d ios --release
+```
+
+Use `--dart-define=API_BASE_URL=...` only when you want to override that default,
+for example to point a device build at a staging backend.
 
 The Flutter app includes:
 

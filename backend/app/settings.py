@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "NGX Portfolio API"
+    app_name: str = "Stockfolio API"
     database_url: str = Field(validation_alias="DATABASE_URL")
     jwt_secret_key: str = Field(validation_alias="JWT_SECRET_KEY")
     jwt_algorithm: str = Field(default="HS256", validation_alias="JWT_ALGORITHM")
@@ -15,6 +15,8 @@ class Settings(BaseSettings):
         validation_alias="CORS_ORIGINS",
     )
     admin_emails: str = Field(default="", validation_alias="ADMIN_EMAILS")
+    ngxpulse_base_url: str = Field(default="https://www.ngxpulse.ng", validation_alias="NGXPULSE_BASE_URL")
+    ngxpulse_api_key: str | None = Field(default=None, validation_alias="NGXPULSE_API_KEY")
 
     ngx_ticker_url: str = Field(
         default="https://doclib.ngxgroup.com/REST/api/statistics/ticker",
@@ -102,6 +104,10 @@ class Settings(BaseSettings):
     @property
     def push_enabled(self) -> bool:
         return bool(self.firebase_project_id and (self.firebase_service_account_json or self.firebase_service_account_file))
+
+    @property
+    def ngxpulse_enabled(self) -> bool:
+        return bool(self.ngxpulse_api_key and self.ngxpulse_api_key.strip())
 
 
 @lru_cache

@@ -1,6 +1,8 @@
 from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from .financials import FinancialsOut
 
 
 class RegisterRequest(BaseModel):
@@ -32,6 +34,7 @@ class UserOut(BaseModel):
     id: int
     email: EmailStr
     full_name: str | None = None
+    profile_image_url: str | None = None
     phone: str | None = None
     address: str | None = None
     city: str | None = None
@@ -46,6 +49,7 @@ class UserOut(BaseModel):
 
 class ProfileUpdate(BaseModel):
     full_name: str | None = Field(default=None, max_length=255)
+    profile_image_url: str | None = Field(default=None, max_length=2_000_000)
     phone: str | None = Field(default=None, max_length=64)
     address: str | None = Field(default=None, max_length=255)
     city: str | None = Field(default=None, max_length=128)
@@ -89,11 +93,14 @@ class StockOut(BaseModel):
     low_price: float | None = None
     volume: float | None = None
     market_cap: float | None = None
+    shares_outstanding: float | None = None
+    pe_ratio: float | None = None
     change: float | None = None
     percent_change: float | None = None
     margin: float | None = None
     source: str | None = None
     updated_at: datetime | None = None
+    supports_history: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -116,6 +123,7 @@ class HoldingUpsert(BaseModel):
     manual_name: str | None = None
     manual_current_price: float | None = Field(default=None, ge=0)
     notes: str | None = None
+    merge_with_existing: bool = True
 
 
 class HoldingOut(BaseModel):
@@ -124,9 +132,9 @@ class HoldingOut(BaseModel):
     quantity: float
     avg_purchase_price: float
     current_price: float | None = None
-    total_value: float
+    total_value: float | None
     total_cost: float
-    profit_loss: float
+    profit_loss: float | None
     profit_loss_percent: float | None = None
     notes: str | None = None
 
@@ -187,16 +195,92 @@ class CompanyNewsOut(BaseModel):
     submission_type: str | None = None
 
 
+class DividendHistoryOut(BaseModel):
+    symbol: str | None = None
+    company_name: str | None = None
+    ex_dividend_date: date | None = None
+    record_date: date | None = None
+    pay_date: date | None = None
+    dividend_per_share: float | None = None
+    currency: str | None = None
+
+
+class DisclosureOut(BaseModel):
+    title: str | None = None
+    url: str | None = None
+    published_at: datetime | None = None
+    symbol: str | None = None
+    company_name: str | None = None
+    category: str | None = None
+    summary: str | None = None
+    source: str | None = None
+
+
+class MarketNewsOut(BaseModel):
+    title: str | None = None
+    url: str | None = None
+    published_at: datetime | None = None
+    source: str | None = None
+    summary: str | None = None
+    image_url: str | None = None
+
+
+class MarketOfferOut(BaseModel):
+    name: str
+    symbol: str | None = None
+    kind: str
+    status: str
+    next_date: date | None = None
+    url: str
+
+
 class StockDetailOut(BaseModel):
+    financials: FinancialsOut = Field(default_factory=FinancialsOut)
     stock: StockOut
     history: list[StockPriceOut]
     market_snapshot: MarketSnapshotOut | None = None
+    history_source: str | None = None
     news: list[CompanyNewsOut] = []
+    dividends: list[DividendHistoryOut] = []
+    disclosures: list[DisclosureOut] = []
+    offers: list[MarketOfferOut] = []
 
 
 class MarketLeadersOut(BaseModel):
     top_movers: list[StockOut]
     top_losers: list[StockOut]
+
+
+class MarketIdeaOut(BaseModel):
+    stock: StockOut
+    score: float
+    one_year_growth_percent: float | None = None
+    stocks_analyzed: int | None = None
+    rationale: list[str] = []
+    web_summary: str | None = None
+    price_to_earnings_ratio: float | None = None
+    price_to_book_ratio: float | None = None
+    fundamental_note: str | None = None
+
+
+class ValuationSignalOut(BaseModel):
+    signal: Literal["Buy", "Hold", "Sell"]
+    symbol: str
+    sector: str
+    pe: float
+    pb: float
+    peer_pe: float
+    peer_pb: float
+    peer_count: int
+    as_of: datetime
+
+
+class MarketIdeasOut(BaseModel):
+    disclaimer: str
+    generated_at: datetime | None = None
+    stocks_analyzed: int = 0
+    ideas: list[MarketIdeaOut]
+    valuation_signals: list[ValuationSignalOut] = Field(default_factory=list)
 
 
 class PushStatusOut(BaseModel):

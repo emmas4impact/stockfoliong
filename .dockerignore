@@ -1,5 +1,6 @@
 .git
 .env
+.privacy-local/
 .venv
 __pycache__/
 .pycache/

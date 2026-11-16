@@ -133,24 +133,28 @@ def _resend_error_message(response: requests.Response) -> str:
 
 def portfolio_report_pdf(user: User, holdings: list[dict]) -> bytes:
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, title="NGX Portfolio Report")
+    doc = SimpleDocTemplate(buffer, pagesize=A4, title="Stockfolio Report")
     styles = getSampleStyleSheet()
     story = [
-        Paragraph("NGX Portfolio Report", styles["Title"]),
+        Paragraph("Stockfolio Report", styles["Title"]),
         Paragraph(f"Investor: {user.full_name or user.email}", styles["Normal"]),
         Paragraph(f"Email: {user.email}", styles["Normal"]),
         Paragraph(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", styles["Normal"]),
         Spacer(1, 16),
     ]
 
-    total_value = sum(float(item["total_value"]) for item in holdings)
+    def amount(value):
+        return f"NGN {value:,.2f}" if value is not None else "Quote pending"
+
+    total_value = (sum(float(item["total_value"]) for item in holdings)
+                   if all(item["total_value"] is not None for item in holdings) else None)
     total_cost = sum(float(item["total_cost"]) for item in holdings)
-    profit_loss = total_value - total_cost
+    profit_loss = total_value - total_cost if total_value is not None else None
     story.extend(
         [
-            Paragraph(f"Portfolio value: NGN {total_value:,.2f}", styles["Heading3"]),
+            Paragraph(f"Portfolio value: {amount(total_value)}", styles["Heading3"]),
             Paragraph(f"Amount invested: NGN {total_cost:,.2f}", styles["Normal"]),
-            Paragraph(f"Profit / loss: NGN {profit_loss:,.2f}", styles["Normal"]),
+            Paragraph(f"Profit / loss: {amount(profit_loss)}", styles["Normal"]),
             Spacer(1, 12),
         ]
     )
@@ -163,8 +167,8 @@ def portfolio_report_pdf(user: User, holdings: list[dict]) -> bytes:
                 f"{float(item['quantity']):,.2f}",
                 f"{float(item['avg_purchase_price']):,.2f}",
                 "-" if item["current_price"] is None else f"{float(item['current_price']):,.2f}",
-                f"{float(item['total_value']):,.2f}",
-                f"{float(item['profit_loss']):,.2f}",
+                amount(item["total_value"]),
+                amount(item["profit_loss"]),
             ]
         )
 

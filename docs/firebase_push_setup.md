@@ -24,7 +24,10 @@ Follow the official Firebase Flutter setup and FCM setup:
 - [Receive messages using Firebase Cloud Messaging in Flutter](https://firebase.google.com/docs/cloud-messaging/flutter/receive?hl=en)
 - [Authorize server-side FCM HTTP v1 sends](https://firebase.google.com/docs/cloud-messaging/auth-server)
 
-For Android and iOS, collect these values from Firebase:
+Use the native Firebase client configuration by default: supply
+`flutter_app/android/app/google-services.json` to the Android build and bundle
+`flutter_app/ios/Runner/GoogleService-Info.plist` in the Runner target. No
+Firebase Dart flags are required for these builds. For an explicit override:
 
 - `FIREBASE_PROJECT_ID`
 - `FIREBASE_MESSAGING_SENDER_ID`

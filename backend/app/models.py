@@ -1,9 +1,10 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, LargeBinary, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from .settings import get_settings
 
 
 class TimestampMixin:
@@ -20,6 +21,7 @@ class User(TimestampMixin, Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    profile_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     address: Mapped[str | None] = mapped_column(String(255), nullable=True)
     city: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -46,12 +48,15 @@ class Stock(TimestampMixin, Base):
     ngx_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     sector: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
+    unit_price_field: Mapped[str | None] = mapped_column(String(32), nullable=True)
     previous_close: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     open_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     high_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     low_price: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     volume: Mapped[float | None] = mapped_column(Numeric(20, 2), nullable=True)
     market_cap: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)
+    shares_outstanding: Mapped[float | None] = mapped_column(Numeric(24, 2), nullable=True)
+    pe_ratio: Mapped[float | None] = mapped_column(Numeric(14, 4), nullable=True)
     change: Mapped[float | None] = mapped_column(Numeric(18, 4), nullable=True)
     percent_change: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
     margin: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
@@ -59,6 +64,18 @@ class Stock(TimestampMixin, Base):
 
     prices: Mapped[list["StockPrice"]] = relationship(back_populates="stock", cascade="all, delete-orphan")
     holdings: Mapped[list["PortfolioHolding"]] = relationship(back_populates="stock")
+
+    @property
+    def supports_history(self) -> bool:
+        return bool(self.ngx_id) or get_settings().ngxpulse_enabled
+
+
+class StockLogo(TimestampMixin, Base):
+    __tablename__ = "stock_logos"
+
+    symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol", ondelete="CASCADE"), primary_key=True)
+    png: Mapped[bytes] = mapped_column(LargeBinary)
+    source: Mapped[str] = mapped_column(Text)
 
 
 class StockPrice(TimestampMixin, Base):
@@ -75,6 +92,38 @@ class StockPrice(TimestampMixin, Base):
     volume: Mapped[float | None] = mapped_column(Numeric(20, 2), nullable=True)
 
     stock: Mapped[Stock] = relationship(back_populates="prices")
+
+
+class FundamentalObservation(Base):
+    __tablename__ = "fundamental_observations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    observation_key: Mapped[str] = mapped_column(String(64), unique=True)
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source: Mapped[str] = mapped_column(String(64))
+    inputs: Mapped[dict] = mapped_column(JSON)
+
+
+class FinancialStatement(TimestampMixin, Base):
+    __tablename__ = "financial_statements"
+
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), primary_key=True)
+    period_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+
+class StockAnalysis(Base):
+    __tablename__ = "stock_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    analysis_key: Mapped[str] = mapped_column(String(64), unique=True)
+    stock_symbol: Mapped[str] = mapped_column(ForeignKey("stocks.symbol"), index=True)
+    observation_id: Mapped[int] = mapped_column(ForeignKey("fundamental_observations.id"))
+    model_version: Mapped[str] = mapped_column(String(64))
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict] = mapped_column(JSON)
 
 
 class SyncLog(TimestampMixin, Base):
@@ -96,6 +145,14 @@ class MarketStatus(TimestampMixin, Base):
     source: Mapped[str] = mapped_column(String(64), default="ngx_doclib")
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ApiCache(TimestampMixin, Base):
+    __tablename__ = "api_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[str] = mapped_column(Text)
 
 
 class PortfolioHolding(TimestampMixin, Base):

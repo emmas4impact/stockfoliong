@@ -14,6 +14,15 @@ def bump(version: str, part: str) -> str:
         raise SystemExit("Could not find version like 'version: 1.0.0+1' in flutter_app/pubspec.yaml")
 
     major, minor, patch, build = [int(value) for value in match.groups()]
+
+    def next_release_version(current_minor: int, current_patch: int) -> tuple[int, int]:
+        next_patch = current_patch + 1
+        next_minor = current_minor
+        if next_patch > 9:
+            next_minor += 1
+            next_patch = 0
+        return next_minor, next_patch
+
     if part == "major":
         major += 1
         minor = 0
@@ -22,9 +31,9 @@ def bump(version: str, part: str) -> str:
         minor += 1
         patch = 0
     elif part == "patch":
-        patch += 1
+        minor, patch = next_release_version(minor, patch)
     elif part == "build":
-        pass
+        minor, patch = next_release_version(minor, patch)
     else:
         raise SystemExit("Usage: python scripts/bump_flutter_version.py [major|minor|patch|build]")
 
@@ -44,9 +53,15 @@ def main() -> None:
     APP_VERSION.write_text(
         "\n".join(
             [
-                f"const appVersionName = '{major}.{minor}.{patch}';",
-                f"const appBuildNumber = '{build}';",
-                f"const appDisplayVersion = '{major}.{minor}.{patch}+{build}';",
+                "const appVersionName = String.fromEnvironment(",
+                "  'APP_VERSION_NAME',",
+                f"  defaultValue: '{major}.{minor}.{patch}',",
+                ");",
+                "const appBuildNumber = String.fromEnvironment(",
+                "  'APP_BUILD_NUMBER',",
+                f"  defaultValue: '{build}',",
+                ");",
+                "const appDisplayVersion = appVersionName;",
                 "",
             ]
         ),
