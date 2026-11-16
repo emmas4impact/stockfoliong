@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert
 
 from .models import FundamentalObservation, StockAnalysis
 
-MODEL_VERSION = "sector-pe-v1"
+MODEL_VERSION = "sector-pe-v2"
 MAX_AGE = timedelta(days=7)
 MIN_PEERS = 3
 DISCLAIMER = "Research information only, not financial advice. Contact your broker for detailed analysis."
@@ -31,6 +31,40 @@ def finite_number(value):
 
 def utc(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def parse_timestamp(value):
+    if isinstance(value, datetime):
+        return utc(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        return utc(datetime.fromisoformat(value))
+    except ValueError:
+        return None
+
+
+def data_freshness(received_at, updated_at, now):
+    received, updated = parse_timestamp(received_at), parse_timestamp(updated_at)
+    now = utc(now)
+    if any(value is not None and not now - MAX_AGE <= value <= now for value in (received, updated)):
+        return "stale"
+    return "current" if received is not None and updated is not None else "unknown"
+
+
+def pe_freshness(observation, now):
+    inputs = observation.inputs
+    metrics = inputs.get("fundamentals")
+    # An unrelated valuation timestamp must not certify a stock-list P/E.
+    if not isinstance(metrics, dict) or finite_number(metrics.get("pe_ratio")) is None:
+        return "unknown"
+    if finite_number(metrics["pe_ratio"]) != finite_number(inputs.get("pe_ratio")):
+        return "unknown"
+    received = inputs.get("fundamentals_received_at", observation.observed_at)
+    status = data_freshness(received, metrics.get("updated_at"), now)
+    if not utc(now) - MAX_AGE <= utc(observation.observed_at) <= utc(now):
+        return "stale"
+    return status
 
 
 def record_observation(db, stock_data, observed_at=None):
@@ -86,37 +120,43 @@ def score_observation(target, universe, now=None):
     inputs = target.inputs
     pe = finite_number(inputs.get("pe_ratio"))
     sector = inputs.get("sector")
-    fresh = utc(now) - MAX_AGE <= utc(target.observed_at) <= utc(now)
+    freshness = pe_freshness(target, now)
+    fresh = freshness == "current"
     peers = [row for row in universe if (
         row.stock_symbol != target.stock_symbol and sector
         and row.inputs.get("sector") == sector and row.source == target.source
-        and utc(now) - MAX_AGE <= utc(row.observed_at) <= utc(now)
+        and pe_freshness(row, now) == "current"
         and (finite_number(row.inputs.get("pe_ratio")) or 0) > 0
     )]
     values = [float(row.inputs["pe_ratio"]) for row in peers]
     reasons = []
     score = None
     sector_pe = median(values) if len(values) >= MIN_PEERS else None
-    if not fresh:
-        reasons.append("The observation is older than seven days or has a future timestamp.")
+    if freshness == "stale":
+        reasons.append("The observation, fundamentals receipt or provider update is older than seven days or in the future.")
+    elif freshness == "unknown":
+        reasons.append("P/E freshness cannot be confirmed from matching provider fundamentals and valid receipt/update timestamps.")
     if pe is None or pe <= 0:
         reasons.append("A positive P/E is unavailable; zero or negative P/E is not scored as cheap.")
     if not sector:
         reasons.append("Sector classification is unavailable.")
     if len(peers) < MIN_PEERS:
-        reasons.append("At least three fresh, positive-P/E sector peers from the same source are required.")
+        reasons.append("At least three positive-P/E sector peers from the same source with confirmed current fundamentals are required.")
     if fresh and pe is not None and pe > 0 and sector_pe is not None:
         score = round(100 * sum(1 if other > pe else 0.5 if other == pe else 0 for other in values) / len(values), 2)
         reasons.append("Valuation is the percentile of sector peers with a higher P/E, with half weight for ties.")
     return {
         "symbol": target.stock_symbol, "model_version": MODEL_VERSION,
         "observed_at": utc(target.observed_at).isoformat(), "source": target.source,
-        "inputs": inputs, "stale": not fresh,
+        "inputs": inputs, "stale": not fresh, "freshness": freshness,
         "scores": {"valuation": score, "growth": None, "dividend": None,
                    "financial_strength": None, "momentum": None, "overall": None},
         "sector_pe_median": sector_pe, "peer_count": len(peers),
         "peer_inputs": [{"symbol": row.stock_symbol, "observation_id": row.id,
-                         "pe_ratio": row.inputs["pe_ratio"]} for row in sorted(peers, key=lambda row: row.stock_symbol)],
+                         "pe_ratio": row.inputs["pe_ratio"],
+                         "provider_updated_at": row.inputs["fundamentals"].get("updated_at"),
+                         "received_at": row.inputs.get("fundamentals_received_at", utc(row.observed_at).isoformat())}
+                        for row in sorted(peers, key=lambda row: row.stock_symbol)],
         "coverage": {"scored_components": int(score is not None), "total_components": 5},
         "reasons": reasons,
         "limitations": ["Financial reporting dates are unknown. Stock-list P/E has an unspecified basis.",

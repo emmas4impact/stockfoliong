@@ -25,7 +25,7 @@ from .ngx_client import (
 )
 from .settings import get_settings
 from .schemas import HoldingUpsert
-from .analysis import record_observation, archive_sync_analysis
+from .analysis import record_observation, archive_sync_analysis, data_freshness, parse_timestamp
 
 
 def upsert_stock(db: Session, stock_data: dict) -> Stock:
@@ -68,14 +68,28 @@ DISCLOSURE_FEED_KEY = "kobo_disclosures"
 FUNDAMENTALS_CACHE_KEY = "kobo_fundamentals:bulk"
 FUNDAMENTALS_RETRY_KEY = "kobo_fundamentals:retry_after"
 FUNDAMENTALS_REFRESH_INTERVAL = timedelta(hours=24)
+FUNDAMENTALS_PARTIAL_REFRESH_INTERVAL = timedelta(hours=1)
 FUNDAMENTALS_FAILURE_BACKOFF = timedelta(hours=1)
+
+
+def fundamentals_batch_status(symbols, received, now):
+    counts = {"current": 0, "stale": 0, "unknown": 0}
+    for metrics in symbols.values():
+        counts[data_freshness(received, metrics.get("updated_at"), now)] += 1
+    mixed = counts["current"] > 0 and counts["stale"] > 0
+    interval = FUNDAMENTALS_PARTIAL_REFRESH_INTERVAL if mixed else FUNDAMENTALS_REFRESH_INTERVAL
+    return {**counts, "mixed_freshness": mixed, "refresh_interval_seconds": int(interval.total_seconds())}
 
 
 def _fundamentals_for_sync(db):
     now = datetime.now(timezone.utc)
     batch = get_cached_dict_payload(db, FUNDAMENTALS_CACHE_KEY)
-    if batch and datetime.fromisoformat(batch["received_at"]) + FUNDAMENTALS_REFRESH_INTERVAL > now:
-        return batch["symbols"], batch["received_at"]
+    if batch:
+        batch_status = fundamentals_batch_status(batch["symbols"], batch["received_at"], now)
+        interval = timedelta(seconds=batch_status["refresh_interval_seconds"])
+        received_at = parse_timestamp(batch["received_at"])
+        if received_at is not None and received_at <= now < received_at + interval:
+            return batch["symbols"], batch["received_at"]
 
     retry = get_cached_dict_payload(db, FUNDAMENTALS_RETRY_KEY)
     if retry and datetime.fromisoformat(retry["retry_after"]) > now:
@@ -174,6 +188,12 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
                     trailing_pe_count += 1
             enrichment_message = (f"Kobo fundamentals matched {matches}/{len(stocks)} stocks; "
                                   f"{trailing_pe_count} supplied a numeric trailing P/E.")
+            batch_status = fundamentals_batch_status(fundamentals, received, datetime.now(timezone.utc))
+            enrichment_message += (f" Batch timestamps: {batch_status['current']} current, "
+                                   f"{batch_status['stale']} stale, {batch_status['unknown']} unknown; "
+                                   f"refresh interval {batch_status['refresh_interval_seconds'] // 3600}h.")
+            if batch_status["mixed_freshness"]:
+                record_sync_log(db, status="warning", source="kobo_fundamentals", message=enrichment_message)
 
     history_count = 0
     for stock_data in stocks:

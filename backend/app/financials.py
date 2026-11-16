@@ -1,13 +1,13 @@
 """Reviewed statements and explicitly dated provider valuations, never PDF guesses."""
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from statistics import median
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, HttpUrl, model_validator
 from sqlalchemy import func, select
 
-from .analysis import MAX_AGE, MIN_PEERS, finite_number, utc
+from .analysis import MAX_AGE, MIN_PEERS, data_freshness, finite_number, parse_timestamp, utc
 from .models import FinancialStatement, FundamentalObservation
 
 
@@ -89,20 +89,11 @@ def valuation_snapshot(observation, now=None):
     if not isinstance(metrics, dict):
         return None
     now = now or datetime.now(timezone.utc)
-    updated = None
-    try:
-        updated = datetime.fromisoformat(metrics.get("updated_at") or "")
-        updated = utc(updated)
-    except (TypeError, ValueError):
-        pass
-    freshness = "unknown"
-    if updated is not None:
-        freshness = "current" if now - timedelta(days=7) <= updated <= now else "stale"
+    updated = parse_timestamp(metrics.get("updated_at"))
     observed = utc(datetime.fromisoformat(observation.inputs["fundamentals_received_at"])) if (
         observation.inputs.get("fundamentals_received_at")
     ) else utc(observation.observed_at)
-    if not now - timedelta(days=7) <= observed <= now:
-        freshness = "stale"
+    freshness = data_freshness(observed, updated, now)
     return ValuationOut(
         observed_at=observed, provider_updated_at=updated,
         freshness=freshness,
