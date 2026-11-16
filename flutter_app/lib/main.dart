@@ -4,6 +4,8 @@ import 'dart:math';
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart' show HardwareKeyboard, KeyEvent, KeyDownEvent, KeyRepeatEvent;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
@@ -20,6 +22,7 @@ import 'profile_image_picker_stub.dart'
 import 'stock_logo_assets.dart';
 import 'sector_valuation.dart';
 import 'financials.dart';
+import 'web_idle_timeout.dart';
 import 'biometric_session.dart';
 import 'biometric_widgets.dart';
 
@@ -756,18 +759,25 @@ class ApiClient {
     final prefs = await SharedPreferences.getInstance();
     _token = biometricSession.supported
         ? await biometricSession.restore() : prefs.getString('access_token');
-    if (kIsWeb &&
-        _token != null &&
-        prefs.getInt(_webSessionDeadlineKey) == null) {
-      await _startWebSession(prefs);
+    if (kIsWeb && _token != null) {
+      final deadline = prefs.getInt(_webSessionDeadlineKey);
+      if (deadline == null || DateTime.now().millisecondsSinceEpoch >= deadline) {
+        await clearToken();
+      }
     }
   }
 
   Future<void> clearToken() async {
     _sessionRevision++;
+    final previous = _token;
     _token = null;
     if (biometricSession.supported) await biometricSession.clear();
     final prefs = await SharedPreferences.getInstance();
+    if (kIsWeb) {
+      await prefs.reload();
+      // A tab with an old session must not clear a newer login in another tab.
+      if (prefs.getString('access_token') != previous) return;
+    }
     await prefs.remove('access_token');
     await prefs.remove(_webSessionDeadlineKey);
     await prefs.remove(_webSessionExtendedKey);
@@ -824,9 +834,9 @@ class ApiClient {
   Future<void> _startWebSession(SharedPreferences prefs) async {
     await prefs.setInt(
       _webSessionDeadlineKey,
-      DateTime.now().add(const Duration(hours: 1)).millisecondsSinceEpoch,
+      DateTime.now().add(WebIdleTimeout.window).millisecondsSinceEpoch,
     );
-    await prefs.setBool(_webSessionExtendedKey, false);
+    await prefs.remove(_webSessionExtendedKey);
   }
 
   Map<String, String> get _headers => {
@@ -3313,7 +3323,7 @@ class DashboardShell extends StatefulWidget {
   State<DashboardShell> createState() => _DashboardShellState();
 }
 
-class _DashboardShellState extends State<DashboardShell> {
+class _DashboardShellState extends State<DashboardShell> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   int index = 0;
   late Future<AppUser> userFuture = widget.api.me();
@@ -3322,16 +3332,11 @@ class _DashboardShellState extends State<DashboardShell> {
       .instance
       .ensureRegistered(registerToken: widget.api.registerPushToken);
   Timer? alertTimer;
-  Timer? webSessionTimer;
+  WebIdleTimeout? webIdle;
   StreamSubscription<PushAlertMessage>? pushMessageSubscription;
   StreamSubscription<PushAlertMessage>? pushOpenSubscription;
   final Map<String, double> _lastSeenHoldingPrices = {};
   final Map<String, double> _lastAlertPrices = {};
-  DateTime? webSessionDeadline;
-  bool webSessionExtended = false;
-  bool sessionPromptOpen = false;
-  bool webSessionEnding = false;
-  bool webSessionExpiredMessageShown = false;
   bool hideFinancialValues = false;
 
   @override
@@ -3343,11 +3348,10 @@ class _DashboardShellState extends State<DashboardShell> {
       (_) => _checkPortfolioAlerts(),
     );
     if (kIsWeb) {
-      Future<void>.delayed(Duration.zero, _loadWebSessionState);
-      webSessionTimer = Timer.periodic(
-        const Duration(seconds: 1),
-        (_) => _handleWebSessionTick(),
-      );
+      WidgetsBinding.instance.addObserver(this);
+      GestureBinding.instance.pointerRouter.addGlobalRoute(_webPointer);
+      HardwareKeyboard.instance.addHandler(_webKey);
+      unawaited(_loadWebSessionState());
     }
     Future<void>.delayed(Duration.zero, _loadFinancialPrivacyState);
     pushMessageSubscription = PushNotifications.instance.messages.listen(
@@ -3362,34 +3366,65 @@ class _DashboardShellState extends State<DashboardShell> {
   @override
   void dispose() {
     alertTimer?.cancel();
-    webSessionTimer?.cancel();
+    if (kIsWeb) {
+      WidgetsBinding.instance.removeObserver(this);
+      GestureBinding.instance.pointerRouter.removeGlobalRoute(_webPointer);
+      HardwareKeyboard.instance.removeHandler(_webKey);
+      webIdle?.dispose();
+    }
     pushMessageSubscription?.cancel();
     pushOpenSubscription?.cancel();
     super.dispose();
   }
 
   Future<void> _loadWebSessionState() async {
-    if (!kIsWeb) return;
     final prefs = await SharedPreferences.getInstance();
-    final deadlineMs = prefs.getInt(_webSessionDeadlineKey);
-    final deadline = deadlineMs == null
-        ? DateTime.now().add(const Duration(hours: 1))
-        : DateTime.fromMillisecondsSinceEpoch(deadlineMs);
-    final extended = prefs.getBool(_webSessionExtendedKey) ?? false;
-    if (deadlineMs == null) {
-      await prefs.setInt(
-        _webSessionDeadlineKey,
-        deadline.millisecondsSinceEpoch,
-      );
-      await prefs.setBool(_webSessionExtendedKey, extended);
-    }
     if (!mounted) return;
-    setState(() {
-      webSessionDeadline = deadline;
-      webSessionExtended = extended;
-      webSessionExpiredMessageShown = false;
-    });
-    _handleWebSessionTick();
+    final token = widget.api._token;
+    DateTime? storedDeadline() {
+      final value = prefs.getInt(_webSessionDeadlineKey);
+      return value == null ? null : DateTime.fromMillisecondsSinceEpoch(value);
+    }
+    webIdle = WebIdleTimeout(
+      deadline: storedDeadline() ?? DateTime.fromMillisecondsSinceEpoch(0),
+      readSharedDeadline: () async {
+        await prefs.reload();
+        return prefs.getString('access_token') == token ? storedDeadline() : null;
+      },
+      persist: (value) async {
+        await prefs.reload();
+        if (!mounted || widget.api._token != token || prefs.getString('access_token') != token) return;
+        if (value.millisecondsSinceEpoch > (prefs.getInt(_webSessionDeadlineKey) ?? 0)) {
+          await prefs.setInt(_webSessionDeadlineKey, value.millisecondsSinceEpoch);
+        }
+      },
+      onExpired: () {
+        if (!mounted) return;
+        showMessage(context, 'Signed out after inactivity.');
+        unawaited(widget.onSignOut());
+      },
+    );
+  }
+
+  void _webPointer(PointerEvent event) {
+    if (!event.synthesized && (event is PointerDownEvent || event is PointerMoveEvent ||
+        event is PointerHoverEvent || event is PointerSignalEvent || event is PointerPanZoomUpdateEvent)) {
+      webIdle?.activity();
+    }
+  }
+
+  bool _webKey(KeyEvent event) {
+    if (event is KeyDownEvent || event is KeyRepeatEvent) webIdle?.activity();
+    return false;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      webIdle?.check();
+    } else {
+      webIdle?.flush();
+    }
   }
 
   Future<void> _loadFinancialPrivacyState() async {
@@ -3411,130 +3446,6 @@ class _DashboardShellState extends State<DashboardShell> {
     });
   }
 
-  Future<void> _handleWebSessionTick() async {
-    if (!mounted ||
-        !kIsWeb ||
-        webSessionDeadline == null ||
-        sessionPromptOpen ||
-        webSessionEnding) {
-      return;
-    }
-    final remaining = webSessionDeadline!.difference(DateTime.now());
-    if (remaining.isNegative || remaining.inSeconds == 0) {
-      if (!webSessionExtended) {
-        sessionPromptOpen = true;
-        final extend = await _promptWebSessionExtension();
-        sessionPromptOpen = false;
-        if (extend == true) {
-          final prefs = await SharedPreferences.getInstance();
-          final nextDeadline = DateTime.now().add(const Duration(minutes: 30));
-          await prefs.setInt(
-            _webSessionDeadlineKey,
-            nextDeadline.millisecondsSinceEpoch,
-          );
-          await prefs.setBool(_webSessionExtendedKey, true);
-          if (!mounted) return;
-          setState(() {
-            webSessionDeadline = nextDeadline;
-            webSessionExtended = true;
-            webSessionExpiredMessageShown = false;
-          });
-          showMessage(context, 'Session extended for 30 minutes.');
-          return;
-        }
-      }
-      await _endExpiredWebSession();
-      return;
-    }
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  Future<bool?> _promptWebSessionExtension() async {
-    var secondsLeft = 10;
-    var dialogOpen = true;
-    BuildContext? dialogContext;
-    late void Function(VoidCallback fn) setDialogState;
-    final timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!dialogOpen) {
-        timer.cancel();
-        return;
-      }
-      secondsLeft -= 1;
-      if (secondsLeft <= 0) {
-        timer.cancel();
-        if (dialogContext != null && Navigator.of(dialogContext!).canPop()) {
-          Navigator.of(dialogContext!).pop(false);
-        }
-        return;
-      }
-      if (dialogContext != null) {
-        setDialogState(() {});
-      }
-    });
-    final result = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        dialogContext = context;
-        return StatefulBuilder(
-          builder: (context, setState) {
-            setDialogState = setState;
-            return AlertDialog(
-              title: const Text('Session expired'),
-              content: Text(
-                'Your web session has reached 1 hour. Extend it once for another 30 minutes?\n\nAuto sign out in ${secondsLeft}s.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(false),
-                  child: const Text('Log out'),
-                ),
-                FilledButton(
-                  onPressed: () => Navigator.of(context).pop(true),
-                  child: const Text('Extend 30 mins'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-    dialogOpen = false;
-    timer.cancel();
-    return result;
-  }
-
-  Future<void> _endExpiredWebSession() async {
-    if (!mounted || webSessionEnding) return;
-    webSessionEnding = true;
-    if (mounted) {
-      setState(() {
-        sessionPromptOpen = false;
-        webSessionDeadline = null;
-      });
-    }
-    if (!webSessionExpiredMessageShown) {
-      webSessionExpiredMessageShown = true;
-      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-      showMessage(context, 'Session expired. Sign in to continue.');
-    }
-    await widget.onSignOut();
-  }
-
-  String? get sessionCountdownLabel {
-    if (!kIsWeb || webSessionDeadline == null) return null;
-    final remaining = webSessionDeadline!.difference(DateTime.now());
-    if (remaining.isNegative) return 'Session ending';
-    final hours = remaining.inHours;
-    final minutes = remaining.inMinutes.remainder(60);
-    final seconds = remaining.inSeconds.remainder(60);
-    if (hours > 0) {
-      return 'Session ${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-    }
-    return 'Session ${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-  }
 
   Future<void> _seedAlertBaseline() async {
     try {
@@ -3853,24 +3764,6 @@ class _DashboardShellState extends State<DashboardShell> {
               overflow: TextOverflow.ellipsis,
             ),
             actions: [
-              if (sessionCountdownLabel != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  child: Chip(
-                    label: Text(sessionCountdownLabel!),
-                    avatar: Icon(
-                      Icons.timer_outlined,
-                      size: 18,
-                      color: headerForeground,
-                    ),
-                    backgroundColor: headerForeground.withValues(alpha: 0.08),
-                    side: BorderSide(
-                      color: headerForeground.withValues(alpha: 0.16),
-                    ),
-                    labelStyle: TextStyle(color: headerForeground),
-                  ),
-                ),
-              const SizedBox(width: 8),
               InkWell(
                 onTap: () => setState(() => index = 4),
                 borderRadius: BorderRadius.circular(999),
