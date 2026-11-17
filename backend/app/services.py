@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session
 from .models import ApiCache, MarketStatus, PortfolioAlertState, PortfolioHolding, Stock, StockPrice, SyncLog, User
 from .ngx_client import (
     NgxFetchError,
+    active_offers,
+    fetch_offer_snapshot,
+    discover_stock_ngx_id,
     clear_runtime_caches,
     fetch_all_stocks_from_ngx,
     fetch_all_stocks_from_ngx_cached,
@@ -85,6 +88,7 @@ STALE_DATA_MESSAGE = "Issue with NGX server. Current data might not be up to dat
 REFERENCE_CACHE_SYNC_SOURCE = "reference_cache_sync"
 REFERENCE_CACHE_REFRESH_INTERVAL = timedelta(hours=24)
 MARKET_SNAPSHOT_CACHE_KEY = "market_snapshot"
+OFFERS_CACHE_KEY = "market_offers"
 
 
 def market_news_cache_key(limit: int = 6) -> str:
@@ -301,6 +305,21 @@ def refresh_market_overview(db: Session) -> None:
         record_sync_log(db, status="warning", source="market_overview",
                         message="Market overview refresh failed; saved prices are unaffected.")
     db.commit()
+
+
+def refresh_offers_cache(db: Session) -> None:
+    try:
+        snapshot = fetch_offer_snapshot()
+    except NgxFetchError:
+        return
+    cache_api_payload(db, cache_key=OFFERS_CACHE_KEY, payload=snapshot, source="market_offers")
+    db.commit()
+
+
+def get_cached_offers(db: Session) -> list[dict]:
+    # Reapply expiry dates to the original snapshot even while the provider is down.
+    snapshot = get_cached_dict_payload(db, OFFERS_CACHE_KEY)
+    return active_offers(snapshot=snapshot) if snapshot is not None else []
 
 
 def sync_status(db: Session) -> dict:
@@ -706,10 +725,10 @@ def stock_history_query(
     stmt = select(StockPrice).where(StockPrice.stock_symbol == symbol.strip().upper())
     if since is not None:
         stmt = stmt.where(StockPrice.trade_date >= since)
-    rows = list(db.scalars(stmt.order_by(StockPrice.trade_date)).unique().all())
     if limit_trading_days is not None and limit_trading_days > 0:
-        rows = rows[-limit_trading_days:]
-    return rows
+        rows = list(db.scalars(stmt.order_by(StockPrice.trade_date.desc()).limit(limit_trading_days)).all())
+        return list(reversed(rows))
+    return list(db.scalars(stmt.order_by(StockPrice.trade_date)).all())
 
 
 def reference_cache_refresh_due(db: Session) -> bool:
@@ -783,6 +802,17 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
         db.commit()
 
     for symbol, ngx_id, supports_history in stocks:
+        if not ngx_id:
+            try:
+                ngx_id = discover_stock_ngx_id(symbol)
+            except NgxFetchError:
+                ngx_id = None
+            if ngx_id:
+                stock = db.get(Stock, symbol)
+                if stock is not None:
+                    stock.ngx_id = ngx_id
+                    supports_history = True
+                db.commit()
         if supports_history:
             with _sync_stage(f"reference_history:{symbol}"):
                 _bound_sync_database_waits(db)

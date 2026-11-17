@@ -25,7 +25,6 @@ from .models import AccountDeletionRequest, PortfolioHolding, PushDeviceToken, S
 from .notifications import portfolio_report_pdf, send_email
 from .ngx_client import (
     NgxFetchError,
-    active_offers,
     discover_stock_ngx_id,
     fetch_all_stocks_from_ngx_cached,
     fetch_stock_logo,
@@ -76,18 +75,19 @@ from .services import (
     get_cached_market_news,
     get_cached_market_snapshot,
     get_cached_market_status,
+    get_cached_offers,
     price_holdings,
     record_sync_log,
     reference_cache_refresh_due,
     refresh_reference_caches,
     refresh_market_status,
     refresh_market_overview,
+    refresh_offers_cache,
     stock_history_query,
     sync_logs_query,
     sync_status,
     sync_stocks,
     upsert_holding,
-    upsert_stock_history,
 )
 from .settings import get_settings
 
@@ -574,6 +574,7 @@ async def background_stock_sync_loop() -> None:
             await asyncio.to_thread(sync_stocks, db, False)
             await asyncio.to_thread(refresh_market_overview, db)
             await asyncio.to_thread(refresh_market_status, db)
+            await asyncio.to_thread(refresh_offers_cache, db)
             if await asyncio.to_thread(reference_cache_refresh_due, db):
                 await asyncio.to_thread(refresh_reference_caches, db)
             if settings.push_enabled:
@@ -1219,11 +1220,8 @@ def get_stock_dividends(
 
 
 @app.get("/public/market/offers", response_model=list[MarketOfferOut])
-def get_market_offers() -> list[dict]:
-    try:
-        return active_offers()
-    except NgxFetchError as exc:
-        raise HTTPException(status_code=503, detail="Offer information unavailable.") from exc
+def get_market_offers(db: Session = Depends(get_db)) -> list[dict]:
+    return get_cached_offers(db)
 
 
 @app.get("/stocks/{symbol}/disclosures", response_model=list[DisclosureOut])
@@ -1253,27 +1251,9 @@ def get_stock_history(
     if stock is None:
         raise HTTPException(status_code=404, detail="Stock not found")
 
-    ngx_id = stock.ngx_id if settings.ngxpulse_enabled else ensure_stock_ngx_id(db, stock)
-    normalized_range = normalize_history_range(range)
     since, limit_trading_days = resolve_history_window(range_value=range, months=months)
-    rows = stock_history_query(db, symbol, since, limit_trading_days)
-    fetch_since = None if normalized_range == "all" else since
-    if stock.supports_history and stock_history_needs_backfill(
-        rows,
-        normalized_range=normalized_range,
-        since=since,
-        limit_trading_days=limit_trading_days,
-    ):
-        upsert_stock_history(
-            db,
-            stock.symbol,
-            ngx_id,
-            since=fetch_since,
-            allow_legacy_fallback=not settings.ngxpulse_enabled,
-        )
-        db.commit()
-        rows = stock_history_query(db, symbol, since, limit_trading_days)
-    return rows
+    # Provider downloads belong to the background refresh, never chart reads.
+    return stock_history_query(db, stock.symbol, since, limit_trading_days)
 
 
 def build_stock_detail(
@@ -1287,44 +1267,22 @@ def build_stock_detail(
     if stock is None:
         raise HTTPException(status_code=404, detail="Stock not found")
 
-    ngx_id = ensure_stock_ngx_id(db, stock)
-    normalized_range = normalize_history_range(range)
+    ngx_id = stock.ngx_id
     since, limit_trading_days = resolve_history_window(range_value=range, months=months)
     rows = stock_history_query(db, symbol, since, limit_trading_days)
-    fetch_since = None if normalized_range == "all" else since
-    if stock.supports_history and stock_history_needs_backfill(
-        rows,
-        normalized_range=normalized_range,
-        since=since,
-        limit_trading_days=limit_trading_days,
-    ):
-        upsert_stock_history(
-            db,
-            stock.symbol,
-            ngx_id,
-            since=fetch_since,
-            allow_legacy_fallback=not settings.ngxpulse_enabled,
-        )
-        db.commit()
-        db.refresh(stock)
-        rows = stock_history_query(db, symbol, since, limit_trading_days)
+    market_snapshot = get_cached_market_snapshot(db, refresh_if_missing=False)
 
-    market_snapshot = get_cached_market_snapshot(db)
-
-    news = get_cached_company_news(db, stock.symbol, ngx_id, news_limit) if ngx_id else []
+    news = get_cached_company_news(db, stock.symbol, ngx_id, news_limit, refresh_if_missing=False) if ngx_id else []
 
     dividends: list[dict] = []
     disclosures: list[dict] = []
     if settings.ngxpulse_enabled:
-        dividends = get_cached_dividend_history(db, stock.symbol, 10)
+        dividends = get_cached_dividend_history(db, stock.symbol, 10, refresh_if_missing=False)
         disclosures = get_cached_disclosures(db, stock.symbol, 1000)
 
-    try:
-        offers = [row for row in active_offers() if row["symbol"] == stock.symbol or (
-            not row["symbol"] and row["name"].casefold() == (stock.name or "").strip().casefold()
-        )]
-    except NgxFetchError:
-        offers = []
+    offers = [row for row in get_cached_offers(db) if row["symbol"] == stock.symbol or (
+        not row["symbol"] and row["name"].casefold() == (stock.name or "").strip().casefold()
+    )]
 
     return {
         "stock": stock,

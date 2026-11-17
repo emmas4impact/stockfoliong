@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'app_version.dart';
+import 'chart_request_cache.dart';
 import 'config.dart';
 import 'push_notifications.dart';
 import 'profile_image_picker_stub.dart'
@@ -744,6 +745,13 @@ class ApiClient {
   final BiometricSession biometricSession;
   String? _token;
   int _sessionRevision = 0;
+  final _detailCache = ChartRequestCache<StockDetailBundle>();
+  final _historyCache = ChartRequestCache<List<PricePoint>>();
+
+  void _clearChartCache() {
+    _detailCache.clear();
+    _historyCache.clear();
+  }
 
   bool get hasToken => _token != null && _token!.isNotEmpty;
 
@@ -775,6 +783,7 @@ class ApiClient {
 
   Future<void> clearToken() async {
     _sessionRevision++;
+    _clearChartCache();
     final previous = _token;
     _token = null;
     if (biometricSession.supported) await biometricSession.clear();
@@ -792,6 +801,7 @@ class ApiClient {
 
   Future<void> _saveToken(String token) async {
     _sessionRevision++;
+    _clearChartCache();
     final prefs = await SharedPreferences.getInstance();
     if (biometricSession.supported) {
       await biometricSession.savePasswordSession(token);
@@ -1104,16 +1114,20 @@ class ApiClient {
     _expect(response, 204);
   }
 
-  Future<List<PricePoint>> history(String symbol, {String range = '1y'}) async {
-    final response = await _client.get(
-      _uri('/stocks/$symbol/history', {'range': range}),
-      headers: _headers,
-    );
-    _expect(response, 200);
-    final data = jsonDecode(response.body) as List<dynamic>;
-    return data
-        .map((item) => PricePoint.fromJson(item as Map<String, dynamic>))
-        .toList();
+  Future<List<PricePoint>> history(String symbol, {String range = '1y'}) {
+    symbol = symbol.trim().toUpperCase();
+    final key = '$_sessionRevision|${marketDataRefreshSignal.value}|$symbol|$range';
+    return _historyCache.get(key, () async {
+      final response = await _client.get(
+        _uri('/stocks/${Uri.encodeComponent(symbol)}/history', {'range': range}),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 15));
+      _expect(response, 200);
+      final data = jsonDecode(response.body) as List<dynamic>;
+      return data
+          .map((item) => PricePoint.fromJson(item as Map<String, dynamic>))
+          .toList();
+    });
   }
 
   Future<List<DividendRecord>> dividends(
@@ -1153,36 +1167,37 @@ class ApiClient {
     String symbol, {
     String range = '1y',
     int newsLimit = 6,
-  }) async {
-    final response = await _client.get(
-      _uri('/stocks/$symbol/detail', {
-        'range': range,
-        'news_limit': '$newsLimit',
-      }),
-      headers: _headers,
-    );
-    _expect(response, 200);
-    return StockDetailBundle.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
+  }) {
+    return _stockDetail(symbol, range, newsLimit, public: false);
   }
 
   Future<StockDetailBundle> publicStockDetail(
     String symbol, {
     String range = '1y',
     int newsLimit = 6,
-  }) async {
-    final response = await _client.get(
-      _uri('/public/stocks/$symbol/detail', {
-        'range': range,
-        'news_limit': '$newsLimit',
-      }),
-      headers: _headers,
-    );
-    _expect(response, 200);
-    return StockDetailBundle.fromJson(
-      jsonDecode(response.body) as Map<String, dynamic>,
-    );
+  }) {
+    return _stockDetail(symbol, range, newsLimit, public: true);
+  }
+
+  Future<StockDetailBundle> _stockDetail(
+    String symbol, String range, int newsLimit, {required bool public}
+  ) {
+    symbol = symbol.trim().toUpperCase();
+    final key = '$_sessionRevision|${marketDataRefreshSignal.value}|$public|$symbol|$range|$newsLimit';
+    return _detailCache.get(key, () async {
+      final prefix = public ? '/public' : '';
+      final response = await _client.get(
+        _uri('$prefix/stocks/${Uri.encodeComponent(symbol)}/detail', {
+          'range': range,
+          'news_limit': '$newsLimit',
+        }),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 15));
+      _expect(response, 200);
+      return StockDetailBundle.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>,
+      );
+    });
   }
 
   Future<String> syncStocks({bool includeHistory = false}) async {
@@ -1193,6 +1208,7 @@ class ApiClient {
       headers: _headers,
     );
     _expect(response, 200);
+    _clearChartCache();
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     final status = data['status']?.toString() ?? 'success';
     final message = data['message']?.toString();

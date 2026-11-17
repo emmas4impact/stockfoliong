@@ -959,11 +959,15 @@ def _offer_snapshot() -> dict:
     return _kobo_feed("site/offers", authenticated=False)
 
 
-def active_offers(now: datetime | None = None) -> list[dict]:
+def fetch_offer_snapshot() -> dict:
+    return _offer_snapshot()
+
+
+def active_offers(now: datetime | None = None, *, snapshot: dict | None = None) -> list[dict]:
     now = now or datetime.now(timezone.utc)
     wat = timezone(timedelta(hours=1))
     today = now.astimezone(wat).date()
-    snapshot = _offer_snapshot()
+    snapshot = fetch_offer_snapshot() if snapshot is None else snapshot
     updated = _parse_datetime(snapshot.get("updated_at"))
     if not updated or not updated.tzinfo or now - updated > timedelta(hours=48):
         return []

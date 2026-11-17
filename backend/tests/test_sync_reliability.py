@@ -29,6 +29,7 @@ class SyncReliabilityTests(unittest.TestCase):
         self.db.add_all([Stock(symbol="GTCO", last_price=17), Stock(symbol="UBA", last_price=18)])
         self.db.commit()
         self.mock("get_settings", return_value=SimpleNamespace(ngxpulse_enabled=True))
+        self.mock("discover_stock_ngx_id", return_value=None)
         settings = patch("backend.app.models.get_settings", return_value=SimpleNamespace(ngxpulse_enabled=True))
         settings.start()
         self.addCleanup(settings.stop)
@@ -130,12 +131,15 @@ class SyncReliabilityTests(unittest.TestCase):
                 SyncLog.status == "success")))
 
     def test_reference_refresh_completes_and_retains_counts(self):
+        self.mock("discover_stock_ngx_id", side_effect=lambda symbol: symbol)
+        self.mock("fetch_company_news_cached", return_value=[])
         self.mock("fetch_market_snapshot_cached", return_value={})
         self.mock("fetch_market_news_cached", return_value=[])
         self.mock("fetch_disclosure_feed", return_value=[{"symbol": "GTCO"}])
         self.mock("fetch_historical_prices_cached", return_value=[])
         self.mock("fetch_dividend_history_cached", return_value=[])
-        self.assertEqual(services.refresh_reference_caches(self.db), (0, 5))
+        self.assertEqual(services.refresh_reference_caches(self.db), (0, 7))
+        self.assertEqual(self.db.get(Stock, "GTCO").ngx_id, "GTCO")
         self.assertFalse(services.reference_cache_refresh_due(self.db))
 
     def test_overview_failure_does_not_change_saved_prices(self):
