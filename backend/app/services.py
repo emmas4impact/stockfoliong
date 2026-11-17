@@ -1,8 +1,12 @@
 import json
+import logging
 from collections.abc import Sequence
+from contextlib import contextmanager, suppress
 from datetime import date, datetime, timedelta, timezone
+from threading import Lock
+from time import monotonic
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -26,6 +30,37 @@ from .ngx_client import (
 from .settings import get_settings
 from .schemas import HoldingUpsert
 from .analysis import record_observation, archive_sync_analysis, data_freshness, parse_timestamp
+
+
+logger = logging.getLogger("uvicorn.error.sync")
+_stock_sync_lock = Lock()
+STOCK_SYNC_LOCK_ID = 73686501
+SYNC_BUSY_MESSAGE = "A stock sync is already running. Check sync status before trying again."
+
+
+class StockSyncError(RuntimeError):
+    pass
+
+
+@contextmanager
+def _sync_stage(name):
+    started = monotonic()
+    logger.info("Stock sync stage=%s started", name)
+    try:
+        yield
+    except Exception as exc:
+        # Provider exceptions can contain credentials in URLs; do not log their text.
+        logger.error("Stock sync stage=%s failed duration=%.2fs error_type=%s",
+                     name, monotonic() - started, type(exc).__name__)
+        raise
+    else:
+        logger.info("Stock sync stage=%s completed duration=%.2fs", name, monotonic() - started)
+
+
+def _bound_sync_database_waits(db):
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SET LOCAL lock_timeout = '5s'"))
+        db.execute(text("SET LOCAL statement_timeout = '60s'"))
 
 
 def upsert_stock(db: Session, stock_data: dict) -> Stock:
@@ -130,6 +165,33 @@ def record_sync_log(
 
 
 def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, int, str, str | None]:
+    # A disconnected HTTP client does not stop a synchronous worker. Do not let
+    # repeated clicks queue more writers behind a still-running sync.
+    if not _stock_sync_lock.acquire(blocking=False):
+        return "database_cache", 0, 0, "warning", SYNC_BUSY_MESSAGE
+    try:
+        with _sync_stage("database_guard"):
+            _bound_sync_database_waits(db)
+            if db.get_bind().dialect.name == "postgresql":
+                acquired = db.scalar(select(func.pg_try_advisory_xact_lock(STOCK_SYNC_LOCK_ID)))
+                if not acquired:
+                    db.rollback()
+                    return "database_cache", 0, 0, "warning", SYNC_BUSY_MESSAGE
+        return _sync_stocks(db, include_history)
+    except Exception as exc:
+        db.rollback()
+        message = f"Stock sync failed ({type(exc).__name__}). Previous saved prices were retained. Check Railway sync stage logs."
+        with suppress(Exception):
+            _bound_sync_database_waits(db)
+            record_sync_log(db, status="failed", source="stock_sync", message=message)
+            db.commit()
+        db.rollback()
+        raise StockSyncError(message) from None
+    finally:
+        _stock_sync_lock.release()
+
+
+def _sync_stocks(db: Session, include_history: bool) -> tuple[str, int, int, str, str | None]:
     settings = get_settings()
     source = "ngxpulse" if settings.ngxpulse_enabled else "ngx_doclib"
     clear_runtime_caches(
@@ -140,7 +202,8 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
         }
     )
     try:
-        stocks = fetch_all_stocks_from_ngx()
+        with _sync_stage("fetch_quotes"):
+            stocks = fetch_all_stocks_from_ngx()
     except NgxFetchError as exc:
         existing_count = db.scalar(select(func.count()).select_from(Stock)) or 0
         message = f"{STALE_DATA_MESSAGE} {exc}"
@@ -167,7 +230,8 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
     enrichment_message = None
     if source == "ngxpulse":
         try:
-            fundamentals, received = _fundamentals_for_sync(db)
+            with _sync_stage("fundamentals"):
+                fundamentals, received = _fundamentals_for_sync(db)
         except NgxFetchError as exc:
             enrichment_message = f"{exc} Continuing with stock-list data."
             record_sync_log(db, status="warning", source="kobo_fundamentals", message=enrichment_message)
@@ -196,19 +260,21 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
                 record_sync_log(db, status="warning", source="kobo_fundamentals", message=enrichment_message)
 
     history_count = 0
-    for stock_data in stocks:
-        stock = upsert_stock(db, stock_data)
-        record_observation(db, stock_data)
-        if include_history and (settings.ngxpulse_enabled or stock.ngx_id):
-            history_count += upsert_stock_history(
-                db,
-                stock.symbol,
-                stock.ngx_id,
-                allow_legacy_fallback=not settings.ngxpulse_enabled,
-            )
-        history_count += upsert_daily_stock_snapshot(db, stock)
+    with _sync_stage("save_prices"):
+        for stock_data in stocks:
+            stock = upsert_stock(db, stock_data)
+            record_observation(db, stock_data)
+            if include_history and (settings.ngxpulse_enabled or stock.ngx_id):
+                history_count += upsert_stock_history(
+                    db,
+                    stock.symbol,
+                    stock.ngx_id,
+                    allow_legacy_fallback=not settings.ngxpulse_enabled,
+                )
+            history_count += upsert_daily_stock_snapshot(db, stock)
 
-    archive_sync_analysis(db)
+    with _sync_stage("archive_analysis"):
+        archive_sync_analysis(db)
     record_sync_log(
         db,
         status="success",
@@ -217,26 +283,24 @@ def sync_stocks(db: Session, include_history: bool = False) -> tuple[str, int, i
         history_rows_upserted=history_count,
         message=enrichment_message,
     )
-    if settings.ngxpulse_enabled:
-        try:
-            cache_api_payload(
-                db,
-                cache_key=MARKET_SNAPSHOT_CACHE_KEY,
-                payload=fetch_market_snapshot_from_ngx(),
-                source="ngxpulse_market_snapshot",
-            )
-        except NgxFetchError as exc:
-            record_sync_log(
-                db,
-                status="warning",
-                source=source,
-                message=f"Market snapshot refresh after stock sync failed: {exc}",
-            )
-        with db.no_autoflush:
-            refresh_market_status(db)
-    db.commit()
+    with _sync_stage("commit_prices"):
+        db.commit()
     clear_runtime_caches()
     return source, len(stocks), history_count, "success", enrichment_message
+
+
+def refresh_market_overview(db: Session) -> None:
+    """Refresh ancillary data after prices are committed, outside the admin request."""
+    if not get_settings().ngxpulse_enabled:
+        return
+    try:
+        payload = fetch_market_snapshot_from_ngx()
+        cache_api_payload(db, cache_key=MARKET_SNAPSHOT_CACHE_KEY,
+                          payload=payload, source="ngxpulse_market_snapshot")
+    except NgxFetchError:
+        record_sync_log(db, status="warning", source="market_overview",
+                        message="Market overview refresh failed; saved prices are unaffected.")
+    db.commit()
 
 
 def sync_status(db: Session) -> dict:
@@ -465,9 +529,12 @@ def upsert_stock_history(
         )
         return 0
 
-    count = 0
-    for row in rows:
-        base_insert = insert(StockPrice).values(stock_symbol=symbol, **row)
+    # Keep the last provider row for each date, matching the old sequential
+    # updates. PostgreSQL cannot update the same conflict key twice in one batch.
+    unique_rows = {row["trade_date"]: {"stock_symbol": symbol, **row} for row in rows}
+    ordered_rows = [unique_rows[day] for day in sorted(unique_rows)]
+    for offset in range(0, len(ordered_rows), 250):
+        base_insert = insert(StockPrice).values(ordered_rows[offset:offset + 250])
         stmt = base_insert.on_conflict_do_update(
             constraint="uq_stock_prices_symbol_date",
             set_={
@@ -480,8 +547,7 @@ def upsert_stock_history(
             },
         )
         db.execute(stmt)
-        count += 1
-    return count
+    return len(ordered_rows)
 
 
 def upsert_daily_stock_snapshot(db: Session, stock: Stock) -> int:
@@ -662,7 +728,9 @@ def reference_cache_refresh_due(db: Session) -> bool:
 
 
 def refresh_reference_caches(db: Session) -> tuple[int, int]:
-    stocks = list(db.scalars(select(Stock).order_by(Stock.symbol)).all())
+    stocks = [(stock.symbol, stock.ngx_id, stock.supports_history)
+              for stock in db.scalars(select(Stock).order_by(Stock.symbol))]
+    db.commit()
     history_rows = 0
     cache_entries = 0
 
@@ -683,6 +751,7 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
                 source=REFERENCE_CACHE_SYNC_SOURCE,
                 message=f"Market snapshot cache refresh failed: {exc}",
             )
+        db.commit()
         try:
             stories = fetch_market_news_cached(6)
             cache_api_payload(
@@ -699,6 +768,7 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
                 source=REFERENCE_CACHE_SYNC_SOURCE,
                 message=f"Market news cache refresh failed: {exc}",
             )
+        db.commit()
 
     if get_settings().ngxpulse_enabled:
         try:
@@ -710,39 +780,47 @@ def refresh_reference_caches(db: Session) -> tuple[int, int]:
             cache_entries += 1
         except NgxFetchError as exc:
             record_sync_log(db, status="warning", source=REFERENCE_CACHE_SYNC_SOURCE, message=str(exc))
+        db.commit()
 
-    for stock in stocks:
-        if stock.supports_history:
-            history_rows += upsert_stock_history(
-                db,
-                stock.symbol,
-                stock.ngx_id,
-                since=None,
-                allow_legacy_fallback=not get_settings().ngxpulse_enabled,
-            )
+    for symbol, ngx_id, supports_history in stocks:
+        if supports_history:
+            with _sync_stage(f"reference_history:{symbol}"):
+                _bound_sync_database_waits(db)
+                history_rows += upsert_stock_history(
+                    db,
+                    symbol,
+                    ngx_id,
+                    since=None,
+                    allow_legacy_fallback=not get_settings().ngxpulse_enabled,
+                )
+                # Do not hold price-row locks through hundreds of later network
+                # requests. Each completed symbol is independently recoverable.
+                db.commit()
         if not get_settings().ngxpulse_enabled:
             continue
         try:
             cache_api_payload(
                 db,
-                cache_key=dividend_cache_key(stock.symbol, 10),
-                payload=fetch_dividend_history_cached(stock.symbol, 10),
+                cache_key=dividend_cache_key(symbol, 10),
+                payload=fetch_dividend_history_cached(symbol, 10),
                 source="ngxpulse_dividends",
             )
             cache_entries += 1
         except NgxFetchError:
             pass
-        if stock.ngx_id:
+        db.commit()
+        if ngx_id:
             try:
                 cache_api_payload(
                     db,
-                    cache_key=company_news_cache_key(stock.symbol, 6),
-                    payload=fetch_company_news_cached(stock.ngx_id)[:6],
+                    cache_key=company_news_cache_key(symbol, 6),
+                    payload=fetch_company_news_cached(ngx_id)[:6],
                     source="ngx_company_news",
                 )
                 cache_entries += 1
             except NgxFetchError:
                 pass
+            db.commit()
 
     record_sync_log(
         db,

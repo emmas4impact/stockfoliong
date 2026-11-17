@@ -68,6 +68,7 @@ from .schemas import (
     UserOut,
 )
 from .services import (
+    StockSyncError,
     delete_holding,
     get_cached_company_news,
     get_cached_disclosures,
@@ -80,6 +81,7 @@ from .services import (
     reference_cache_refresh_due,
     refresh_reference_caches,
     refresh_market_status,
+    refresh_market_overview,
     stock_history_query,
     sync_logs_query,
     sync_status,
@@ -570,6 +572,7 @@ async def background_stock_sync_loop() -> None:
         db = SessionLocal()
         try:
             await asyncio.to_thread(sync_stocks, db, False)
+            await asyncio.to_thread(refresh_market_overview, db)
             await asyncio.to_thread(refresh_market_status, db)
             if await asyncio.to_thread(reference_cache_refresh_due, db):
                 await asyncio.to_thread(refresh_reference_caches, db)
@@ -1385,7 +1388,10 @@ def run_stock_sync(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_superuser),
 ) -> SyncResult:
-    source, stock_count, history_count, sync_state, message = sync_stocks(db, include_history=include_history)
+    try:
+        source, stock_count, history_count, sync_state, message = sync_stocks(db, include_history=include_history)
+    except StockSyncError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
     return SyncResult(
         source=source,
         stocks_upserted=stock_count,
